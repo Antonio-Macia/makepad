@@ -800,6 +800,27 @@ impl TextInput {
         self.set_is_password(cx, !self.is_password);
     }
 
+    /// Sets the typed-text colour at runtime, across the normal interactive
+    /// states (idle/hover/focus/down).
+    ///
+    /// `TextInput`'s `draw_text` is private, so a consumer cannot re-theme the
+    /// text colour from the outside (e.g. for a light↔dark theme switch). This
+    /// exposes that one operation. The base colour is a plain field; the
+    /// per-state colours (`color_hover`/`color_focus`/`color_down`) are shader
+    /// uniforms, so they are pushed through `draw_vars`. The placeholder
+    /// (`color_empty*`) and `color_disabled` are intentionally left untouched so
+    /// a dimmer placeholder/disabled look survives — set those separately if a
+    /// consumer needs to.
+    pub fn set_text_color(&mut self, cx: &mut Cx, color: Vec4) {
+        self.draw_text.color = color;
+        let c = [color.x, color.y, color.z, color.w];
+        let dv = &mut self.draw_text.draw_vars;
+        dv.set_uniform(cx, live_id!(color_hover), &c);
+        dv.set_uniform(cx, live_id!(color_focus), &c);
+        dv.set_uniform(cx, live_id!(color_down), &c);
+        self.draw_bg.redraw(cx);
+    }
+
     pub fn is_read_only(&self) -> bool {
         self.is_read_only
     }
@@ -3175,6 +3196,15 @@ impl TextInputRef {
     pub fn toggle_is_password(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.toggle_is_password(cx);
+        }
+    }
+
+    /// Sets the typed-text colour at runtime (idle/hover/focus/down). See
+    /// [`TextInput::set_text_color`]. Lets a consumer re-theme a stock
+    /// `TextInput`'s text colour for e.g. a light↔dark switch.
+    pub fn set_text_color(&self, cx: &mut Cx, color: Vec4) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_text_color(cx, color);
         }
     }
 
