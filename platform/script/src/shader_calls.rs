@@ -1919,7 +1919,16 @@ impl ShaderFnCompiler {
                         });
                     }
                     ScriptFnPtr::Native(_) => {
-                        todo!()
+                        // A native (Rust) method on `self` cannot be called from a shader
+                        // body — it would run on the CPU, not the GPU. Report a located
+                        // shader error instead of panicking with a bare `todo!()`, mirroring
+                        // the sibling `handle_scope_object_method_call_args` which already
+                        // handles the identical case this way.
+                        script_err_shader!(
+                            self.trap,
+                            "native methods not supported on shader self"
+                        );
+                        return false;
                     }
                 }
                 self.maybe_pop_to_me(vm, output, opargs);
