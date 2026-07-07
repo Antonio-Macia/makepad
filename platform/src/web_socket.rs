@@ -325,13 +325,53 @@ impl Cx {
     }
 
     pub fn init_websockets(&mut self, studio_http: &str) {
+        // Local-pipe transport (MAKEPAD_STUDIO_PIPE) replaces the studio
+        // websocket entirely when active — see studio_pipe.rs. The batching
+        // thread is websocket-specific and must not run in pipe mode.
+        if crate::studio_pipe::init_studio_pipe_from_env() {
+            return;
+        }
         self.run_studio_websocket_thread();
         self.start_studio_websocket(studio_http);
+    }
+
+    /// Pipe-mode replacement for `recv_studio_websocket_message`: blocks on
+    /// the pipe reader channel, but keeps draining the app-level network
+    /// runtime between polls so HTTP requests issued by the app still get
+    /// their responses dispatched (the websocket path does this inline in
+    /// its own recv loop below).
+    #[cfg(not(target_os = "android"))]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn recv_studio_pipe_message(&mut self) -> Option<WebSocketMessage> {
+        use crate::studio_pipe::PipeRecv;
+        loop {
+            while let Some(response) = self.net.try_recv() {
+                if matches!(
+                    response,
+                    NetworkResponse::WsOpened { .. }
+                        | NetworkResponse::WsClosed { .. }
+                        | NetworkResponse::WsError { .. }
+                        | NetworkResponse::WsMessage { .. }
+                ) {
+                    self.handle_script_web_socket_event(response.clone());
+                }
+                self.handle_script_network_events(std::slice::from_ref(&response));
+                self.call_event_handler(&Event::NetworkResponses(vec![response]));
+            }
+            match crate::studio_pipe::recv_timeout(Duration::from_millis(50)) {
+                PipeRecv::Msg(msg) => return Some(msg),
+                PipeRecv::Timeout => continue,
+                PipeRecv::Closed => return Some(WebSocketMessage::Closed),
+            }
+        }
     }
 
     #[cfg(not(target_os = "android"))]
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn recv_studio_websocket_message(&mut self) -> Option<WebSocketMessage> {
+        if crate::studio_pipe::studio_pipe_mode() {
+            return self.recv_studio_pipe_message();
+        }
         loop {
             let response = self.net.recv().ok()?;
             match response {
@@ -381,6 +421,13 @@ impl Cx {
             let _ = std::io::stdout().write_all(msg.to_json().as_bytes());
             let _ = std::io::stdout().write_all(b"\n");
             let _ = std::io::stdout().flush();
+            return;
+        }
+        if crate::studio_pipe::studio_pipe_mode() {
+            // Direct, unbatched write: frame latency matters more than
+            // syscall count on a local pipe (DrawCompleteAndFlip gates the
+            // host's Present).
+            crate::studio_pipe::send_binary(AppToStudioVec(vec![msg]).serialize_bin());
             return;
         }
         if !Cx::has_studio_web_socket() {
