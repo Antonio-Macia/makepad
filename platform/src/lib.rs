@@ -58,6 +58,7 @@ mod uniform_buffer;
 mod window;
 mod xr_tsdf;
 
+pub mod studio_pipe;
 pub mod web_socket;
 
 pub mod audio_stream;
