@@ -43,3 +43,7 @@ CLAUDE.md
 **/*.obsidian
 /xr/util/dumps/
 
+
+# graphify knowledge graph (generado, no versionar)
+graphify-out/
+/target
