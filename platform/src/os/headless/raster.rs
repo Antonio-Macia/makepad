@@ -389,6 +389,104 @@ struct RenderProfile {
     /// Tiempo de reservar y limpiar el framebuffer del pase (color f32x4 +
     /// z-buffer): 20 bytes por píxel, 18,4 MB a 1280x720.
     framebuffer_ms: f64,
+    /// Tiempo de PREPARACIÓN por draw-call, sin rasterizar: resolver el shader,
+    /// montar los buffers de uniforms, rellenar la plantilla de `RenderCx`.
+    /// Es la parte del coste que NO depende del área pintada, y por tanto la que
+    /// decide si el repintado parcial sirve de algo (H0-bis, ATLAS).
+    setup_ms: f64,
+    /// Desglose por shader: `debug_id -> (ms de raster, fragmentos sombreados,
+    /// nº de draw-calls)`. Sirve para saber qué shader se come el frame.
+    per_shader: HashMap<String, (f64, u64, usize)>,
+}
+
+/// Un draw-call ya PREPARADO, listo para rasterizarse sobre cualquier franja de
+/// filas. Contiene copias propias de todo lo que necesita el rasterizador, así
+/// que varios hilos pueden ejecutarlo en paralelo sobre franjas disjuntas sin
+/// tocar el `Cx` (que no es `Send`).
+///
+/// Los punteros a función del shader JIT son `extern "C" fn`, que sí son
+/// `Send`/`Sync`; el módulo `.so` que los contiene lo mantiene vivo el `Cx`
+/// durante todo el frame.
+struct BandJob {
+    indices: Vec<u32>,
+    instance_count: usize,
+    vertex_count: usize,
+    varying_slots: usize,
+    shaded_positions: Vec<[f32; 4]>,
+    shaded_varyings: Vec<f32>,
+    flat_slots: usize,
+    rcx_template: Vec<u8>,
+    rcx_size: usize,
+    rcx_f32s: usize,
+    rcx_vary_offset: usize,
+    rcx_quad_mode_offset: usize,
+    rcx_frag_offset: usize,
+    uses_derivatives: bool,
+    fragment_fn: FragmentFn,
+    is_draw_text_shader: bool,
+}
+
+/// Rasteriza el plan completo con `bands` hilos, uno por franja horizontal.
+///
+/// El framebuffer se parte en trozos de filas DISJUNTOS con `split_at_mut`, así
+/// que no hay `unsafe`, no hay contención de escritura y el orden de pintado se
+/// conserva dentro de cada franja (que es lo único que importa: dos franjas
+/// nunca escriben el mismo píxel).
+fn run_band_jobs(fb: &mut Framebuffer, jobs: &[BandJob], bands: usize) {
+    let width = fb.width;
+    let height = fb.height;
+    let chunks = compute_index_chunks(height, bands, 1);
+
+    // Trocear color y depth en rebanadas de filas alineadas con `chunks`.
+    let mut color_rest: &mut [[f32; 4]] = fb.color.as_mut_slice();
+    let mut depth_rest: &mut [f32] = fb.depth.as_mut_slice();
+    let mut parts: Vec<(usize, usize, &mut [[f32; 4]], &mut [f32])> = Vec::new();
+    let mut consumed = 0usize;
+    for c in &chunks {
+        let rows = c.end - c.start;
+        let px = rows * width;
+        let (cl, cr) = color_rest.split_at_mut(px);
+        let (dl, dr) = depth_rest.split_at_mut(px);
+        color_rest = cr;
+        depth_rest = dr;
+        parts.push((c.start, c.end, cl, dl));
+        consumed += rows;
+    }
+    debug_assert_eq!(consumed, height);
+
+    std::thread::scope(|scope| {
+        for (row_start, row_end, color_chunk, depth_chunk) in parts {
+            scope.spawn(move || {
+                for j in jobs {
+                    rasterize_instances_rows(
+                        color_chunk,
+                        depth_chunk,
+                        width,
+                        height,
+                        row_start,
+                        row_end,
+                        &j.indices,
+                        j.instance_count,
+                        j.vertex_count,
+                        j.varying_slots,
+                        &j.shaded_positions,
+                        &j.shaded_varyings,
+                        j.flat_slots,
+                        &j.rcx_template,
+                        j.rcx_size,
+                        j.rcx_f32s,
+                        j.rcx_vary_offset,
+                        j.rcx_quad_mode_offset,
+                        j.rcx_frag_offset,
+                        j.uses_derivatives,
+                        j.fragment_fn,
+                        false,
+                        j.is_draw_text_shader,
+                    );
+                }
+            });
+        }
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -714,7 +812,15 @@ impl Cx {
                     let fb_start = std::time::Instant::now();
                     let mut fb = Framebuffer::new(width, height);
                     let clear = self.passes[*draw_pass_id].clear_color;
-                    fb.clear([clear.x, clear.y, clear.z, clear.w], 1.0);
+                    // Con scissor activo se limpia SÓLO la región de damage: es lo
+                    // que haría un compositor con repintado parcial de verdad.
+                    if let Some((cx0, cy0, cx1, cy1)) =
+                        super::virtual_gpu::headless_clip_rect()
+                    {
+                        fb.clear_rect([clear.x, clear.y, clear.z, clear.w], 1.0, cx0, cy0, cx1, cy1);
+                    } else {
+                        fb.clear([clear.x, clear.y, clear.z, clear.w], 1.0);
+                    }
                     profile.framebuffer_ms += fb_start.elapsed().as_secs_f64() * 1000.0;
 
                     self.headless_draw_pass(
@@ -773,12 +879,44 @@ impl Cx {
             let convs = TEXTURE_CONVERSIONS.swap(0, std::sync::atomic::Ordering::Relaxed);
             let conv_px = TEXTURE_CONVERTED_PX.swap(0, std::sync::atomic::Ordering::Relaxed);
             crate::log!(
-                "[headless][profile] texture={:.1}ms framebuffer={:.1}ms conversiones={} px_convertidos={}",
+                "[headless][profile] texture={:.1}ms framebuffer={:.1}ms setup={:.1}ms conversiones={} px_convertidos={}",
                 profile.texture_ms,
                 profile.framebuffer_ms,
+                profile.setup_ms,
                 convs,
                 conv_px
             );
+            let tested = super::virtual_gpu::FRAG_TESTED
+                .swap(0, std::sync::atomic::Ordering::Relaxed);
+            let shaded = super::virtual_gpu::FRAG_SHADED
+                .swap(0, std::sync::atomic::Ordering::Relaxed);
+            crate::log!(
+                "[headless][profile] frag_tested={} frag_shaded={} ns_por_frag={:.1}",
+                tested,
+                shaded,
+                if shaded > 0 {
+                    profile.raster_ms * 1.0e6 / shaded as f64
+                } else {
+                    0.0
+                }
+            );
+            let mut rows: Vec<(String, (f64, u64, usize))> =
+                profile.per_shader.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            rows.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap());
+            for (name, (ms, frags, calls)) in rows.iter().take(12) {
+                crate::log!(
+                    "[headless][shader] {:<28} {:>7.1}ms  frags={:<9} draws={:<3} ns/frag={:.1}",
+                    name,
+                    ms,
+                    frags,
+                    calls,
+                    if *frags > 0 {
+                        ms * 1.0e6 / *frags as f64
+                    } else {
+                        0.0
+                    }
+                );
+            }
         }
 
         results
@@ -802,6 +940,28 @@ impl Cx {
         let zbias_step = self.passes[draw_pass_id].zbias_step;
         let mut zbias = 0.0f32;
 
+        // ── Modo BANDAS (`MAKEPAD_HEADLESS_BANDS=N`) ──────────────────────────
+        //
+        // POR QUÉ EXISTE: el pool de hilos que trae el backend headless también
+        // parte por filas, pero lo hace DENTRO de cada draw-call. Con ~51
+        // draw-calls por frame eso son 51 repartos y 51 barreras por frame, para
+        // trocear triángulos que muchas veces cubren unos pocos cientos de
+        // píxeles: el reparto cuesta más que el trabajo, y por eso "más hilos"
+        // salía más lento.
+        //
+        // Este modo hace el reparto correcto para un rasterizador: se recorre la
+        // escena UNA vez en serie (resolver shaders, uniforms, sombreado de
+        // vértices) acumulando un plan de trabajo, y después N hilos rasterizan
+        // el plan ENTERO, cada uno sobre su franja horizontal del framebuffer.
+        // Una sola barrera por frame y cero contención: las franjas son
+        // regiones disjuntas de memoria.
+        let bands = std::env::var("MAKEPAD_HEADLESS_BANDS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 1);
+
+        let mut jobs: Option<Vec<BandJob>> = bands.map(|_| Vec::new());
+
         self.headless_render_view(
             draw_pass_id,
             draw_list_id,
@@ -813,7 +973,16 @@ impl Cx {
             texture_cache,
             converted_textures,
             profile.as_deref_mut(),
+            &mut jobs,
         );
+
+        if let (Some(n_bands), Some(jobs)) = (bands, jobs) {
+            let raster_start = std::time::Instant::now();
+            run_band_jobs(fb, &jobs, n_bands);
+            if let Some(p) = profile.as_deref_mut() {
+                p.raster_ms += raster_start.elapsed().as_secs_f64() * 1000.0;
+            }
+        }
     }
 
     fn headless_render_view(
@@ -828,6 +997,7 @@ impl Cx {
         texture_cache: &mut TextureConversionCache,
         converted_textures: &mut Vec<crate::texture::TextureId>,
         mut profile: Option<&mut RenderProfile>,
+        jobs: &mut Option<Vec<BandJob>>,
     ) {
         let only_shader = std::env::var("MAKEPAD_HEADLESS_ONLY_SHADER").ok();
         let debug_text = std::env::var("MAKEPAD_HEADLESS_DEBUG_TEXT").is_ok();
@@ -863,6 +1033,7 @@ impl Cx {
                     texture_cache,
                     converted_textures,
                     profile.as_deref_mut(),
+                    jobs,
                 );
                 continue;
             }
@@ -904,6 +1075,22 @@ impl Cx {
                     continue;
                 }
             }
+            // ── Instrumentación H0-bis: cronómetro de PREPARACIÓN del draw-call ──
+            // Cubre desde aquí hasta el shading de vértices: resolución de
+            // símbolos, montaje de uniforms y relleno del `RenderCx`. Es coste
+            // por draw-call, independiente del área, y es justo lo que NO se
+            // ahorra con repintado parcial.
+            let setup_start = std::time::Instant::now();
+            let tex_ms_before = profile.as_deref().map(|p| p.texture_ms).unwrap_or(0.0);
+            // Etiqueta legible del shader para el desglose. `debug_id` sale como
+            // `0` cuando el shader viene del DSL (no tiene id de depuración), así
+            // que se usa el id del shader compilado + si es el de texto, que es
+            // la distinción que interesa (glifos vs Sdf2d).
+            let shader_name = format!(
+                "{}#{}",
+                if is_draw_text_shader { "text" } else { "sdf" },
+                os_shader_id
+            );
             let os_shader = &self.draw_shaders.os_shaders[os_shader_id];
             let module = match &os_shader.module {
                 Some(m) => m,
@@ -1104,6 +1291,13 @@ impl Cx {
                 p.total_triangles += tri_count * instance_count;
             }
 
+            if let Some(p) = profile.as_deref_mut() {
+                // La conversión de texturas ya se contabiliza aparte: se resta
+                // para que `setup_ms` sea preparación pura.
+                let tex_delta = p.texture_ms - tex_ms_before;
+                p.setup_ms += setup_start.elapsed().as_secs_f64() * 1000.0 - tex_delta;
+            }
+
             let vertex_start = std::time::Instant::now();
             let shaded_vert_count = instance_count * vertex_count;
             let mut shaded_positions = vec![[0.0f32; 4]; shaded_vert_count];
@@ -1143,7 +1337,14 @@ impl Cx {
             }
 
             let flat_slots = os_shader.flat_varying_slots.min(varying_slots);
-            let uses_derivatives = os_shader.uses_derivatives;
+            // `MAKEPAD_HEADLESS_NO_DERIV` (instrumentación H0-bis): desactiva el
+            // camino de derivadas. NO es una optimización usable —el texto pierde
+            // el antialiasing—, es una sonda: ese camino invoca el shader de
+            // fragmento TRES veces por píxel (dFdx, dFdy y el real) e interpola
+            // los varyings tres veces. Comparar con/sin dice cuánto del coste del
+            // texto es el shader en sí y cuánto es el andamiaje de derivadas.
+            let uses_derivatives =
+                os_shader.uses_derivatives && std::env::var("MAKEPAD_HEADLESS_NO_DERIV").is_err();
             let row_chunks = compute_row_chunks(fb.height, render_threads);
             let use_parallel = row_chunks.len() > 1
                 && tri_count.saturating_mul(instance_count) >= parallel_min_tris
@@ -1156,7 +1357,33 @@ impl Cx {
                 }
             }
 
+            // Modo bandas: no se rasteriza aquí. Se guarda el draw-call ya
+            // preparado y se pinta al final del pase, con N hilos por franja.
+            if let Some(jobs) = jobs.as_mut() {
+                jobs.push(BandJob {
+                    indices: indices.clone(),
+                    instance_count,
+                    vertex_count,
+                    varying_slots,
+                    shaded_positions,
+                    shaded_varyings,
+                    flat_slots,
+                    rcx_template,
+                    rcx_size,
+                    rcx_f32s,
+                    rcx_vary_offset,
+                    rcx_quad_mode_offset,
+                    rcx_frag_offset,
+                    uses_derivatives,
+                    fragment_fn,
+                    is_draw_text_shader,
+                });
+                continue;
+            }
+
             let raster_start = std::time::Instant::now();
+            let shaded_before =
+                super::virtual_gpu::FRAG_SHADED.load(std::sync::atomic::Ordering::Relaxed);
             if use_parallel {
                 let pool = self.os.render_pool.as_ref().unwrap();
                 let (done_tx, done_rx) = mpsc::channel::<()>();
@@ -1284,7 +1511,15 @@ impl Cx {
                 );
             }
             if let Some(p) = profile.as_deref_mut() {
-                p.raster_ms += raster_start.elapsed().as_secs_f64() * 1000.0;
+                let dt = raster_start.elapsed().as_secs_f64() * 1000.0;
+                let shaded = super::virtual_gpu::FRAG_SHADED
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .saturating_sub(shaded_before);
+                p.raster_ms += dt;
+                let e = p.per_shader.entry(shader_name).or_insert((0.0, 0, 0));
+                e.0 += dt;
+                e.1 += shaded;
+                e.2 += 1;
             }
         }
     }

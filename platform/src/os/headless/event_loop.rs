@@ -184,7 +184,16 @@ impl Cx {
                 self.redraw_all();
             }
             if self.os.no_draw || self.need_redrawing() {
+                // Reloj de pared del ciclo COMPLETO (evento de draw + render +
+                // present). Es la cifra honesta de "cuánto tarda un frame".
+                let cycle_start = std::time::Instant::now();
                 let _ = self.headless_process_draw_cycle(&mut windows, false, time_now);
+                if std::env::var("MAKEPAD_HEADLESS_PROFILE").is_ok() {
+                    crate::log!(
+                        "[headless][profile] CICLO_TOTAL={:.1}ms",
+                        cycle_start.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
             }
             completed_cycles += 1;
 
@@ -206,7 +215,18 @@ impl Cx {
             self.os.no_draw_initialized = true;
             return false;
         }
+        // Instrumentación H0-bis: `call_draw_event` es TODA la parte de UI que no
+        // es rasterizado (recorrido del árbol de widgets, layout, shaping de
+        // texto, construcción de draw-lists). Va aparte porque el repintado
+        // parcial NO la ahorra: es coste por frame, no por píxel.
+        let draw_ev_start = std::time::Instant::now();
         self.call_draw_event(time_now);
+        if std::env::var("MAKEPAD_HEADLESS_PROFILE").is_ok() {
+            crate::log!(
+                "[headless][profile] call_draw_event(layout+widgets)={:.1}ms",
+                draw_ev_start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         self.headless_compile_shaders();
         if send_protocol && self.screenshot_requests.is_empty() {
             self.headless_render_all_passes(time_now);
@@ -522,7 +542,27 @@ impl Cx {
                 continue;
             }
 
+            // Instrumentación H0-bis: el volcado a PNG es coste de la SONDA, no
+            // del escritorio (en ATLAS el present es un blit RGBA a la surface).
+            // Se cronometra aparte y se puede desactivar con
+            // `MAKEPAD_HEADLESS_NO_PNG=1` para medir sin ese ruido.
+            let profile_on = std::env::var("MAKEPAD_HEADLESS_PROFILE").is_ok();
+            let conv_start = std::time::Instant::now();
             let rgba = fb.to_rgba8();
+            let conv_ms = conv_start.elapsed().as_secs_f64() * 1000.0;
+            if std::env::var("MAKEPAD_HEADLESS_NO_PNG").is_ok() {
+                if profile_on {
+                    crate::log!(
+                        "[headless][profile] to_rgba8(present)={:.1}ms png=omitido bytes={}",
+                        conv_ms,
+                        rgba.len()
+                    );
+                }
+                state.frame_id += 1;
+                rendered_any = true;
+                continue;
+            }
+            let png_start = std::time::Instant::now();
             let png = match encode_png_rgba(width, height, &rgba) {
                 Ok(png) => png,
                 Err(err) => {
@@ -535,6 +575,13 @@ impl Cx {
                     continue;
                 }
             };
+            if profile_on {
+                crate::log!(
+                    "[headless][profile] to_rgba8(present)={:.1}ms png_encode={:.1}ms",
+                    conv_ms,
+                    png_start.elapsed().as_secs_f64() * 1000.0
+                );
+            }
 
             let png_path = output_dir.join(format!(
                 "window_{window_id}_frame_{:06}.png",
