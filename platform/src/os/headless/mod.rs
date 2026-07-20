@@ -69,6 +69,10 @@ pub struct CxOs {
     pub(crate) draw_cycles: Option<usize>,
     pub(crate) render_pool: Option<MessageThreadPool<()>>,
     pub(crate) render_pool_threads: usize,
+    /// Caché persistente de texturas convertidas a RGBA-f32 (ver
+    /// `raster::TextureConversionCache`). Persistir entre frames evita
+    /// reconvertir el atlas de glifos en cada pintado.
+    pub(crate) texture_conversion_cache: raster::TextureConversionCache,
 }
 
 impl Default for CxOs {
@@ -83,6 +87,7 @@ impl Default for CxOs {
             draw_cycles: None,
             render_pool: None,
             render_pool_threads: 0,
+            texture_conversion_cache: Default::default(),
         }
     }
 }
@@ -161,11 +166,10 @@ impl Cx {
         0
     }
 
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    pub fn share_texture_for_presentable_image(
-        &mut self,
-        _texture: &crate::Texture,
-    ) -> Option<crate::os::shared_framebuf::LinuxOwnedImage> {
-        None
-    }
+    // NOTA (ATLAS/H0): la variante Linux de `share_texture_for_presentable_image`
+    // devolvía `Option<LinuxOwnedImage>`, un tipo que sólo existe cuando se
+    // compila el backend Linux real (DMA-BUF). Bajo `headless` ese tipo ya no se
+    // compila (ver shared_framebuf.rs), y además no hay nada que compartir: el
+    // framebuffer es memoria normal del proceso. Por eso aquí no hay variante
+    // Linux; el swapchain compartido usa el camino de "plataforma no soportada".
 }

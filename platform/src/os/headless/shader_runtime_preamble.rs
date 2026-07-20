@@ -148,6 +148,55 @@ pub const fn vec4f(x: f32, y: f32, z: f32, w: f32) -> Vec4f {
     Vec4f { x, y, z, w }
 }
 
+// ─── Constructor escalar `u32(...)` ─────────────────────────────────────────
+//
+// POR QUÉ (ATLAS/H0): el compilador de shaders emite las conversiones de tipo
+// como llamadas con el nombre del tipo destino —igual que en MPSL/GLSL, donde
+// `uint(0)` es una conversión válida—. Para vectores eso funciona porque el
+// preámbulo define `vec2f`/`vec3f`/`vec4f` como funciones. Para el escalar sin
+// signo el generador emite `u32(0)`, que en Rust no resuelve: `u32` es un tipo
+// primitivo, no una función, y rustc falla con E0423 ("expected function, found
+// builtin type"). Como los nombres de función y los de tipo viven en espacios
+// de nombres distintos, se puede declarar una función llamada `u32` sin ocultar
+// al tipo (el tipo de retorno de abajo sigue resolviendo al primitivo).
+//
+// Sin esto, TODO shader que use enteros sin signo —en particular el shader de
+// texto "slug", que codifica en un `u32` las raíces de las curvas del glifo— no
+// compila, y la pantalla sale sin texto. Es el bloqueo que se encontró al
+// ejecutar el backend headless por primera vez en Linux.
+//
+// Se usa un trait propio (`ShaderToU32`) en vez de `Into<u32>` porque los
+// literales enteros del código generado se infieren como `i32`, y `i32` NO
+// implementa `Into<u32>` (podría desbordar). En un shader la semántica correcta
+// es la del `as` de C/GLSL: truncar/reinterpretar sin ceremonia.
+pub trait ShaderToU32 {
+    fn shader_to_u32(self) -> u32;
+}
+impl ShaderToU32 for i32 {
+    #[inline(always)]
+    fn shader_to_u32(self) -> u32 {
+        self as u32
+    }
+}
+impl ShaderToU32 for u32 {
+    #[inline(always)]
+    fn shader_to_u32(self) -> u32 {
+        self
+    }
+}
+impl ShaderToU32 for f32 {
+    #[inline(always)]
+    fn shader_to_u32(self) -> u32 {
+        self as u32
+    }
+}
+
+#[allow(non_snake_case)]
+#[inline(always)]
+pub fn u32<T: ShaderToU32>(v: T) -> u32 {
+    v.shader_to_u32()
+}
+
 // ─── Vec2f operators ───
 
 impl ops::Add for Vec2f {
@@ -1166,6 +1215,33 @@ impl Mix<f32> for Vec4f {
             self.y + (b.y - self.y) * t,
             self.z + (b.z - self.z) * t,
             self.w + (b.w - self.w) * t,
+        )
+    }
+}
+
+// Faltaban las variantes de `mix` con factor VECTORIAL para Vec3f/Vec4f
+// (interpolación componente a componente). En GLSL/MPSL `mix(a, b, vec4(t))` es
+// legal y Brasa lo usa —p. ej. el widget de "chip" mezcla color de superficie y
+// de acento con un factor por canal—, así que sin estos `impl` ese shader no
+// compila y el widget se pinta sin su relleno. (ATLAS/H0.)
+impl Mix<Vec3f> for Vec3f {
+    type Output = Vec3f;
+    fn mix_impl(self, b: Vec3f, t: Vec3f) -> Vec3f {
+        vec3(
+            self.x + (b.x - self.x) * t.x,
+            self.y + (b.y - self.y) * t.y,
+            self.z + (b.z - self.z) * t.z,
+        )
+    }
+}
+impl Mix<Vec4f> for Vec4f {
+    type Output = Vec4f;
+    fn mix_impl(self, b: Vec4f, t: Vec4f) -> Vec4f {
+        vec4(
+            self.x + (b.x - self.x) * t.x,
+            self.y + (b.y - self.y) * t.y,
+            self.z + (b.z - self.z) * t.z,
+            self.w + (b.w - self.w) * t.w,
         )
     }
 }

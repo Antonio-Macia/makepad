@@ -45,6 +45,36 @@ impl HeadlessWindowState {
     }
 }
 
+/// Tamaño lógico forzado de ventana, leído de `MAKEPAD_HEADLESS_SIZE`
+/// (formato `ANCHOxALTO`, p. ej. `1280x720`). `None` si no está definida o no
+/// se puede parsear. Cacheado por el mismo motivo que la de abajo.
+fn headless_forced_window_size() -> Option<crate::makepad_math::DVec2> {
+    use std::sync::OnceLock;
+    static SIZE: OnceLock<Option<(f64, f64)>> = OnceLock::new();
+    let parsed = *SIZE.get_or_init(|| {
+        let raw = std::env::var("MAKEPAD_HEADLESS_SIZE").ok()?;
+        let (w, h) = raw.split_once(['x', 'X'])?;
+        let w = w.trim().parse::<f64>().ok()?;
+        let h = h.trim().parse::<f64>().ok()?;
+        if w > 0.0 && h > 0.0 {
+            Some((w, h))
+        } else {
+            None
+        }
+    });
+    parsed.map(|(w, h)| dvec2(w, h))
+}
+
+/// ¿Está activo el redibujado forzado por ciclo? (`MAKEPAD_HEADLESS_FORCE_REDRAW`)
+///
+/// Se consulta una vez y se cachea porque el bucle la mira en cada iteración y
+/// `std::env::var` no es gratis (toma un lock global del entorno).
+fn headless_force_redraw_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("MAKEPAD_HEADLESS_FORCE_REDRAW").is_ok())
+}
+
 impl Cx {
     pub fn event_loop(cx: Rc<RefCell<Cx>>) {
         cx.borrow_mut().self_ref = Some(cx.clone());
@@ -141,6 +171,17 @@ impl Cx {
             let time_now = self.os.stdin_timers.time_now();
             if !self.new_next_frames.is_empty() {
                 self.call_next_frame_event(time_now);
+            }
+            // Redibujado forzado (ATLAS/H0, sólo para medir).
+            //
+            // El bucle headless sólo repinta cuando la UI se ensucia, que es lo
+            // correcto para producción pero inútil para cronometrar: una app
+            // estática pinta un frame y ya. Con `MAKEPAD_HEADLESS_FORCE_REDRAW`
+            // se marca todo sucio en cada ciclo, de modo que `--draws=N`
+            // produce N frames completos y se puede separar el coste del PRIMER
+            // frame (atlas de glifos frío, cachés vacías) del de régimen.
+            if headless_force_redraw_enabled() {
+                self.redraw_all();
             }
             if self.os.no_draw || self.need_redrawing() {
                 let _ = self.headless_process_draw_cycle(&mut windows, false, time_now);
@@ -575,11 +616,37 @@ impl Cx {
                     }
 
                     let window = &mut self.windows[window_id];
-                    let inner_size = window
-                        .create_inner_size
-                        .unwrap_or_else(|| dvec2(1920.0, 1080.0));
+                    // Tamaño de la ventana headless.
+                    //
+                    // `MAKEPAD_HEADLESS_SIZE=ANCHOxALTO` (ATLAS/H0) fuerza el
+                    // tamaño lógico de TODA ventana creada, ignorando el que
+                    // pida la app. Sirve para medir siempre a la misma
+                    // resolución (p. ej. 1280x720) sin tocar el código de la
+                    // app ni el de Brasa, que es de sólo lectura para este
+                    // experimento. Sin la variable, se respeta lo que pida la
+                    // app y, si no pide nada, el 1920x1080 de siempre.
+                    let inner_size = headless_forced_window_size().unwrap_or_else(|| {
+                        window
+                            .create_inner_size
+                            .unwrap_or_else(|| dvec2(1920.0, 1080.0))
+                    });
                     let position = window.create_position.unwrap_or_else(|| dvec2(0.0, 0.0));
-                    let dpi_factor = 2.0;
+                    // DPI del backend headless.
+                    //
+                    // POR QUÉ ES CONFIGURABLE (ATLAS/H0): estaba fijo a 2.0, o
+                    // sea que una ventana declarada de 1280x720 puntos se
+                    // rasterizaba a 2560x1440 píxeles reales. Para MEDIR el
+                    // coste por frame a una resolución concreta hace falta
+                    // controlar el factor: con `MAKEPAD_HEADLESS_DPI=1` la
+                    // ventana lógica y el framebuffer coinciden píxel a píxel.
+                    // Si la variable no está o es inválida se mantiene el 2.0
+                    // histórico (retina), para no cambiar el comportamiento de
+                    // nadie.
+                    let dpi_factor = std::env::var("MAKEPAD_HEADLESS_DPI")
+                        .ok()
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .filter(|v| *v > 0.0)
+                        .unwrap_or(2.0);
 
                     let state = &mut windows[window_id.id()];
                     state.created = true;

@@ -123,17 +123,44 @@ struct TextureConversionSignature {
     data_len: usize,
 }
 
-struct CachedTextureConversion {
+/// Contador de diagnóstico: cuántas conversiones REALES (cache miss) se han
+/// hecho y cuántos píxeles suman. Lo consulta el volcado de `MAKEPAD_HEADLESS_PROFILE`
+/// para distinguir "la caché no sirve" de "la caché sirve pero el atlas cambia".
+pub(crate) static TEXTURE_CONVERSIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+pub(crate) static TEXTURE_CONVERTED_PX: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+pub(crate) struct CachedTextureConversion {
     signature: TextureConversionSignature,
     rgba: Vec<f32>,
 }
 
-type TextureConversionCache = HashMap<usize, CachedTextureConversion>;
+/// Caché de conversión de texturas al formato RGBA-f32 que consumen los
+/// shaders generados. Clave: índice de textura.
+///
+/// VIVE EN `CxOs` (no en la pila del render) desde el hito H0 de ATLAS: al
+/// medirlo se vio que reconstruirla en cada frame significaba reconvertir el
+/// atlas de glifos completo —millones de píxeles— una vez por frame, y eso se
+/// comía ~85 % del tiempo de pintado. La entrada se invalida sola por firma
+/// (puntero/tamaño de los datos) y por el flag `updated` de la textura, así que
+/// conservarla entre frames es correcto: si el atlas cambia, se reconvierte.
+pub(crate) type TextureConversionCache = HashMap<usize, CachedTextureConversion>;
 
+/// Convierte (o recupera de caché) una textura al formato RGBA-f32 que espera
+/// el shader generado, y devuelve `[ptr, len, ancho, alto]`.
+///
+/// `already_converted_this_frame`: si la textura YA se convirtió durante este
+/// mismo frame, se ignora su flag `updated` y se sirve la caché. Sin esto, el
+/// atlas de glifos —que llega marcado como "sucio" y sólo lo limpia la subida a
+/// GPU, que aquí no existe— se reconvertía entero en cada uno de los ~48
+/// draw-calls de texto de una pantalla de Brasa. El contenido no cambia a mitad
+/// de frame: el atlas se rellena en la fase de `draw`, no durante el rasterizado.
 fn headless_texture_info(
     texture_index: usize,
     cxtexture: &crate::texture::CxTexture,
     cache: &mut TextureConversionCache,
+    already_converted_this_frame: bool,
 ) -> Option<[usize; 4]> {
     match &cxtexture.format {
         TextureFormat::VecMipRGBAf32 {
@@ -174,8 +201,14 @@ fn headless_texture_info(
                     signature: sig,
                     rgba: Vec::new(),
                 });
-            if entry.signature != sig || !updated.is_empty() || entry.rgba.is_empty() {
+            if entry.signature != sig
+                || (!updated.is_empty() && !already_converted_this_frame)
+                || entry.rgba.is_empty()
+            {
                 entry.signature = sig;
+                TEXTURE_CONVERSIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                TEXTURE_CONVERTED_PX
+                    .fetch_add(*width * *height, std::sync::atomic::Ordering::Relaxed);
                 entry.rgba.clear();
                 entry.rgba.reserve(data.len() * 4);
                 for &pixel in data {
@@ -216,8 +249,14 @@ fn headless_texture_info(
                     signature: sig,
                     rgba: Vec::new(),
                 });
-            if entry.signature != sig || !updated.is_empty() || entry.rgba.is_empty() {
+            if entry.signature != sig
+                || (!updated.is_empty() && !already_converted_this_frame)
+                || entry.rgba.is_empty()
+            {
                 entry.signature = sig;
+                TEXTURE_CONVERSIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                TEXTURE_CONVERTED_PX
+                    .fetch_add(*width * *height, std::sync::atomic::Ordering::Relaxed);
                 entry.rgba.clear();
                 entry.rgba.reserve(expected.saturating_mul(4));
                 for &pixel in data.iter().take(expected) {
@@ -259,8 +298,14 @@ fn headless_texture_info(
                     signature: sig,
                     rgba: Vec::new(),
                 });
-            if entry.signature != sig || !updated.is_empty() || entry.rgba.is_empty() {
+            if entry.signature != sig
+                || (!updated.is_empty() && !already_converted_this_frame)
+                || entry.rgba.is_empty()
+            {
                 entry.signature = sig;
+                TEXTURE_CONVERSIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                TEXTURE_CONVERTED_PX
+                    .fetch_add(*width * *height, std::sync::atomic::Ordering::Relaxed);
                 entry.rgba.clear();
                 entry.rgba.reserve(expected * 4);
                 for &byte in data.iter().take(expected) {
@@ -298,8 +343,14 @@ fn headless_texture_info(
                     signature: sig,
                     rgba: Vec::new(),
                 });
-            if entry.signature != sig || !updated.is_empty() || entry.rgba.is_empty() {
+            if entry.signature != sig
+                || (!updated.is_empty() && !already_converted_this_frame)
+                || entry.rgba.is_empty()
+            {
                 entry.signature = sig;
+                TEXTURE_CONVERSIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                TEXTURE_CONVERTED_PX
+                    .fetch_add(*width * *height, std::sync::atomic::Ordering::Relaxed);
                 entry.rgba.clear();
                 entry.rgba.reserve(expected * 4);
                 for &v in data.iter().take(expected) {
@@ -329,6 +380,15 @@ struct RenderProfile {
     total_triangles: usize,
     vertex_ms: f64,
     raster_ms: f64,
+    /// Tiempo gastado convirtiendo texturas (atlas de glifos, imágenes) al
+    /// formato RGBA-f32 que consume el shader. Se añadió al medir H0 de ATLAS:
+    /// el total por frame no cuadraba con `vertex+raster` ni de lejos, y hacía
+    /// falta saber si el coste era rasterizado real (irreducible) o preparación
+    /// de datos (optimizable con caché entre frames).
+    texture_ms: f64,
+    /// Tiempo de reservar y limpiar el framebuffer del pase (color f32x4 +
+    /// z-buffer): 20 bytes por píxel, 18,4 MB a 1280x720.
+    framebuffer_ms: f64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -617,7 +677,19 @@ impl Cx {
         self.headless_ensure_render_pool(render_threads);
 
         let mut results = Vec::new();
-        let mut texture_cache = TextureConversionCache::new();
+        // Se saca la caché de `CxOs` para poder prestarla mutable mientras
+        // `self` sigue prestado (los draw-calls leen `self.textures`), y se
+        // devuelve al final. `std::mem::take` es O(1): mueve el HashMap.
+        let mut texture_cache = std::mem::take(&mut self.os.texture_conversion_cache);
+        // Texturas cuyo contenido se ha convertido en ESTE frame. Al terminar se
+        // les limpia el flag `updated`, que es justo lo que hacen los backends
+        // nativos cuando suben la textura a la GPU (`take_updated`).
+        //
+        // POR QUÉ (ATLAS/H0): sin esto el atlas de glifos queda marcado como
+        // "sucio" para siempre, la caché de conversión falla en CADA draw-call y
+        // el mismo atlas de 2048x2048 se reconvierte 48 veces por frame. Medido:
+        // ~850 ms de los ~1.000 ms que costaba pintar una pantalla de Brasa.
+        let mut converted_textures: Vec<crate::texture::TextureId> = Vec::new();
 
         for draw_pass_id in &passes_todo {
             self.passes[*draw_pass_id].paint_dirty = false;
@@ -639,9 +711,11 @@ impl Cx {
                     self.passes[*draw_pass_id].set_dpi_factor(dpi_factor);
                     self.passes[*draw_pass_id].set_time(time as f32);
 
+                    let fb_start = std::time::Instant::now();
                     let mut fb = Framebuffer::new(width, height);
                     let clear = self.passes[*draw_pass_id].clear_color;
                     fb.clear([clear.x, clear.y, clear.z, clear.w], 1.0);
+                    profile.framebuffer_ms += fb_start.elapsed().as_secs_f64() * 1000.0;
 
                     self.headless_draw_pass(
                         *draw_pass_id,
@@ -649,6 +723,7 @@ impl Cx {
                         parallel_min_tris,
                         &mut fb,
                         &mut texture_cache,
+                        &mut converted_textures,
                         if profile_enabled {
                             Some(&mut profile)
                         } else {
@@ -662,6 +737,19 @@ impl Cx {
                 }
                 _ => {}
             }
+        }
+
+        // Devolver la caché a `CxOs` para que el siguiente frame la reutilice.
+        self.os.texture_conversion_cache = texture_cache;
+        // Marcar como "subidas" las texturas ya convertidas.
+        // `TextureId` no implementa `Ord`, así que se deduplica con un set del
+        // índice interno (el mismo atlas aparece en decenas de draw-calls).
+        let mut seen = std::collections::HashSet::new();
+        for texture_id in converted_textures {
+            if !seen.insert(texture_id.0) {
+                continue;
+            }
+            self.textures[texture_id].take_updated();
         }
 
         let elapsed = frame_start.elapsed();
@@ -682,6 +770,15 @@ impl Cx {
                 profile.vertex_ms,
                 profile.raster_ms
             );
+            let convs = TEXTURE_CONVERSIONS.swap(0, std::sync::atomic::Ordering::Relaxed);
+            let conv_px = TEXTURE_CONVERTED_PX.swap(0, std::sync::atomic::Ordering::Relaxed);
+            crate::log!(
+                "[headless][profile] texture={:.1}ms framebuffer={:.1}ms conversiones={} px_convertidos={}",
+                profile.texture_ms,
+                profile.framebuffer_ms,
+                convs,
+                conv_px
+            );
         }
 
         results
@@ -694,6 +791,7 @@ impl Cx {
         parallel_min_tris: usize,
         fb: &mut Framebuffer,
         texture_cache: &mut TextureConversionCache,
+        converted_textures: &mut Vec<crate::texture::TextureId>,
         mut profile: Option<&mut RenderProfile>,
     ) {
         let draw_list_id = match self.passes[draw_pass_id].main_draw_list_id {
@@ -713,6 +811,7 @@ impl Cx {
             parallel_min_tris,
             fb,
             texture_cache,
+            converted_textures,
             profile.as_deref_mut(),
         );
     }
@@ -727,6 +826,7 @@ impl Cx {
         parallel_min_tris: usize,
         fb: &mut Framebuffer,
         texture_cache: &mut TextureConversionCache,
+        converted_textures: &mut Vec<crate::texture::TextureId>,
         mut profile: Option<&mut RenderProfile>,
     ) {
         let only_shader = std::env::var("MAKEPAD_HEADLESS_ONLY_SHADER").ok();
@@ -761,6 +861,7 @@ impl Cx {
                     parallel_min_tris,
                     fb,
                     texture_cache,
+                    converted_textures,
                     profile.as_deref_mut(),
                 );
                 continue;
@@ -899,8 +1000,18 @@ impl Cx {
                 if let Some(texture) = &draw_call.texture_slots[tex_idx] {
                     let texture_id = texture.texture_id();
                     let cxtexture = &self.textures[texture_id];
-                    if let Some(info) =
-                        headless_texture_info(texture_id.0, cxtexture, texture_cache)
+                    let tex_start = std::time::Instant::now();
+                    let needs_convert = !cxtexture.updated().is_empty();
+                    let already = converted_textures.iter().any(|t| t.0 == texture_id.0);
+                    let info_opt =
+                        headless_texture_info(texture_id.0, cxtexture, texture_cache, already);
+                    if needs_convert && !already {
+                        converted_textures.push(texture_id);
+                    }
+                    if let Some(p) = profile.as_deref_mut() {
+                        p.texture_ms += tex_start.elapsed().as_secs_f64() * 1000.0;
+                    }
+                    if let Some(info) = info_opt
                     {
                         tex_infos.push(info);
                     } else {
