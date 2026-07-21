@@ -1,3 +1,4 @@
+mod aot;
 mod event_loop;
 mod jit;
 mod raster;
