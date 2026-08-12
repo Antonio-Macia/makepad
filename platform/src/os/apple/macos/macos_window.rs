@@ -935,7 +935,10 @@ impl MacosWindow {
         let mut dragged_files = Vec::new();
         for item in items {
             match item {
-                DragItem::FilePath { path, internal_id } => {
+                DragItem::FilePath { paths, internal_id } => {
+                    // One pasteboard item per path: that's how macOS represents
+                    // a multi-file drag, so a batch goes out as several items.
+                    let path = paths.first().cloned().unwrap_or_default();
                     let pasteboard_item: ObjcId =
                         unsafe { msg_send![class!(NSPasteboardItem), new] };
                     let _: () = unsafe {

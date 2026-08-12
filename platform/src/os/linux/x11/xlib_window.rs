@@ -193,6 +193,37 @@ impl XlibWindow {
                 ptr::null_mut(),
             );
 
+            // And _NET_WM_NAME on top, which is what modern desktops actually
+            // read (EWMH). Xutf8SetWMProperties only sets the legacy WM_NAME,
+            // and it converts through the process locale — so with a locale Xlib
+            // doesn't recognise (notably `C.UTF-8`, which `XSupportsLocale`
+            // rejects) any accented character comes out as mojibake.
+            //
+            // _NET_WM_NAME is always UTF8_STRING, so it doesn't depend on the
+            // locale at all. Same approach already used below for _NET_WM_ICON.
+            {
+                let net_wm_name = x11_sys::XInternAtom(
+                    display,
+                    "_NET_WM_NAME\0".as_ptr() as *const _,
+                    x11_sys::False as c_int,
+                );
+                let utf8_string = x11_sys::XInternAtom(
+                    display,
+                    "UTF8_STRING\0".as_ptr() as *const _,
+                    x11_sys::False as c_int,
+                );
+                x11_sys::XChangeProperty(
+                    display,
+                    window,
+                    net_wm_name,
+                    utf8_string,
+                    8,
+                    x11_sys::PropModeReplace as c_int,
+                    title.as_ptr(),
+                    title.len() as c_int,
+                );
+            }
+
             // Set the WM_CLASS before mapping the window.
             // Based on <https://www.x.org/releases/X11R7.5/doc/man/man3/XSetWMProperties.3.html>
             {
