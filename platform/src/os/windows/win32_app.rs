@@ -462,14 +462,13 @@ impl Win32App {
                 error!("multi-item drag/drop operation not supported");
             }
             match &items[0] {
-                DragItem::FilePath { path, internal_id } => {
-                    //log!("win32: about to drag path \"{}\" with internal ID {:?}", path, internal_id);
-
+                DragItem::FilePath { paths, internal_id } => {
                     // only drag if something is there
-                    if (path.len() > 0) || internal_id.is_some() {
+                    let hay_algo = paths.iter().any(|p| !p.is_empty());
+                    if hay_algo || internal_id.is_some() {
                         // create COM IDataObject that hosts the drag item
                         let data_object: IDataObject = DragItemWindows(DragItem::FilePath {
-                            path: path.clone(),
+                            paths: paths.clone(),
                             internal_id: internal_id.clone(),
                         })
                         .into();

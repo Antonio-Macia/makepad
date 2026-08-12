@@ -929,11 +929,14 @@ pub fn define_cocoa_view_class() -> *const Class {
                     };
                     items.push(DragItem::FilePath {
                         internal_id,
-                        path: if path == "makepad_internal_empty" {
+                        // macOS delivers one pasteboard item per file, so each
+                        // one carries a single path and a batch arrives as
+                        // several `DragItem`s — not as one with several paths.
+                        paths: vec![if path == "makepad_internal_empty" {
                             "".to_string()
                         } else {
                             path
-                        },
+                        }],
                     });
                 }
             }

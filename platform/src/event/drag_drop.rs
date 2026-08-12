@@ -66,14 +66,40 @@ pub enum DragResponse {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DragItem {
+    /// One or more file paths.
+    ///
+    /// This is a `Vec` and not a single `String` on purpose: dropping a batch of
+    /// files is the natural gesture (selecting twenty photos and dragging them
+    /// in), and Windows delivers them all in a single `CF_HDROP`. The previous
+    /// single-path shape forced `dropfiles.rs` to discard the whole batch when
+    /// more than one arrived.
+    ///
+    /// Changing the field — instead of adding a second `FilePaths` variant — is
+    /// deliberate: it breaks every consumer at **compile time**, which forces a
+    /// decision at each site. A new variant would have compiled fine and then
+    /// silently ignored multi-file drops at runtime, which is far worse for the
+    /// user: they drag twenty files and nothing happens, with no error.
+    ///
+    /// Consumers that only care about one file use `paths[0]`; `paths` is never
+    /// empty when the platform layer produces this variant.
     FilePath {
-        path: String,
+        paths: Vec<String>,
         internal_id: Option<LiveId>,
     },
     String {
         value: String,
         internal_id: Option<LiveId>,
     },
+}
+
+impl DragItem {
+    /// Convenience for the common single-file case.
+    pub fn single_path(path: String, internal_id: Option<LiveId>) -> Self {
+        DragItem::FilePath {
+            paths: vec![path],
+            internal_id,
+        }
+    }
 }
 
 /*

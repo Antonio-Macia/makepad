@@ -114,25 +114,37 @@ pub fn convert_medium_to_dragitem(medium: STGMEDIUM) -> Option<DragItem> {
     let _ = unsafe { GlobalUnlock(medium.u.hGlobal) };
     unsafe { ReleaseStgMedium(&medium as *const STGMEDIUM as *mut STGMEDIUM) };
 
-    if filenames.len() != 1 {
-        log!("dropping multiple files is not supported");
+    if filenames.is_empty() {
         return None;
     }
 
+    // All of them. The loop above already parses every name out of CF_HDROP —
+    // the previous code threw the whole batch away whenever more than one
+    // arrived, which is precisely the common case: selecting several files and
+    // dragging them in as a group.
     Some(DragItem::FilePath {
-        path: filenames[0].clone(),
+        paths: filenames,
         internal_id,
     })
 }
 
 // create new internal DROPFILES structure from DragItem
 pub fn create_hglobal_for_dragitem(drag_item: &DragItem) -> Option<HGLOBAL> {
-    if let DragItem::FilePath { path, internal_id } = drag_item {
-        // encode filename
-        let mut encoded_filename: Vec<u16> = path.encode_utf16().collect();
-        encoded_filename.push(0);
+    if let DragItem::FilePath { paths, internal_id } = drag_item {
+        if paths.is_empty() {
+            return None;
+        }
 
-        // only one filename
+        // Encode every filename. CF_HDROP is a double-null-terminated list:
+        // "a\0b\0c\0\0", so several files go out in one drag just as they come
+        // in — same format, both directions.
+        let mut encoded_filename: Vec<u16> = Vec::new();
+        for path in paths {
+            encoded_filename.extend(path.encode_utf16());
+            encoded_filename.push(0);
+        }
+
+        // final terminator of the list
         encoded_filename.push(0);
 
         // create HGLOBAL to contain DROPFILES structure, the internal ID and this encoded filename
