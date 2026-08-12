@@ -3218,6 +3218,25 @@ impl PortalListRef {
         }
     }
 
+    /// Returns the scroll offset of the first visible item.
+    ///
+    /// The counterpart of [`Self::set_first_id_and_scroll`]: without it, a
+    /// caller could restore a scroll position but never read the current one.
+    ///
+    /// This exists for a concrete case: a list whose rows can be dragged to
+    /// reorder them. The `PortalList` reads a vertical drag as a scroll and
+    /// suppresses event delivery to its children while doing so, so the whole
+    /// list moves instead of the row. Freezing the position for the duration of
+    /// the drag needs both halves — read it on `FingerDown`, write it back on
+    /// every frame — and only the writing half was public.
+    pub fn first_scroll(&self) -> f64 {
+        if let Some(inner) = self.borrow() {
+            inner.first_scroll
+        } else {
+            0.0
+        }
+    }
+
     /// Enables whether the PortalList auto-tracks the last item in the list.
     pub fn set_tail_range(&self, tail_range: bool) {
         if let Some(mut inner) = self.borrow_mut() {
