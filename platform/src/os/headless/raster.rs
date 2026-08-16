@@ -939,8 +939,15 @@ impl Cx {
         }
     }
 
-    /// Render all dirty passes and return framebuffers keyed by window_id.
-    pub(crate) fn headless_render_all_passes(&mut self, time: f64) -> Vec<(usize, Framebuffer)> {
+    /// Render all dirty passes into the PERSISTENT window framebuffers.
+    ///
+    /// Returns the ids of the windows that were rendered. The framebuffers
+    /// themselves stay in `self.os.framebuffers`; take them with `mem::take` and
+    /// put them back when done (see `headless_emit_frames`). They are not returned
+    /// by value because they must survive the frame: with partial repaint, what is
+    /// outside the damage rect is *last frame's* pixels, and handing ownership out
+    /// would either lose them or force a multi-megabyte copy per frame.
+    pub(crate) fn headless_render_all_passes(&mut self, time: f64) -> Vec<usize> {
         let frame_start = std::time::Instant::now();
         let profile_enabled = std::env::var("MAKEPAD_HEADLESS_PROFILE").is_ok();
         let parallel_min_tris = configured_parallel_min_tris(1);
@@ -951,6 +958,10 @@ impl Cx {
         self.headless_ensure_render_pool(render_threads);
 
         let mut results = Vec::new();
+        // Los framebuffers salen del almacén persistente y vuelven al final. Se
+        // sacan (no se toman prestados) porque el bucle de abajo necesita `&mut
+        // self` para el resto del render.
+        let mut stored = std::mem::take(&mut self.os.framebuffers);
         let mut texture_cache = std::mem::take(&mut self.os.texture_conversions);
         // Texturas ya convertidas EN ESTE frame. Una textura puede usarse en
         // varias draw calls; sin esto, el atlas de glifos se reconvierte una vez
@@ -978,16 +989,44 @@ impl Cx {
                     self.passes[*draw_pass_id].set_time(time as f32);
 
                     let fb_start = std::time::Instant::now();
-                    let mut fb = Framebuffer::new(width, height);
+
+                    // ── Framebuffer PERSISTENTE ───────────────────────────────
+                    // Se reutiliza el del frame anterior si el tamaño coincide.
+                    // Ese "si" es toda la corrección: cuando NO coincide (primer
+                    // frame, redimensión) no hay pixeles anteriores que conservar,
+                    // así que el recorte por daño no aplica y hay que limpiar
+                    // entero. Tratar los dos casos igual dejaría la primera
+                    // pantalla con basura fuera del rectángulo sucio.
+                    let idx = window_id.id();
+                    if stored.len() <= idx {
+                        stored.resize_with(idx + 1, || None);
+                    }
+                    let reutilizable = matches!(
+                        &stored[idx],
+                        Some(f) if f.width == width && f.height == height
+                    );
+                    let mut fb = match stored[idx].take() {
+                        Some(f) if reutilizable => f,
+                        _ => Framebuffer::new(width, height),
+                    };
+
+                    // 🔴 Y lo que de verdad hace correcto el repintado parcial: el
+                    // daño se SUSPENDE mientras no haya frame anterior. Afecta al
+                    // rasterizado y al present, no sólo al borrado — que era el
+                    // agujero de la primera versión de esto.
+                    super::virtual_gpu::set_clip_suspended(!reutilizable);
+
                     let clear = self.passes[*draw_pass_id].clear_color;
-                    // Con scissor activo se limpia SÓLO la región de damage: es lo
-                    // que haría un compositor con repintado parcial de verdad.
-                    if let Some((cx0, cy0, cx1, cy1)) =
-                        super::virtual_gpu::headless_clip_rect()
-                    {
-                        fb.clear_rect([clear.x, clear.y, clear.z, clear.w], 1.0, cx0, cy0, cx1, cy1);
-                    } else {
-                        fb.clear([clear.x, clear.y, clear.z, clear.w], 1.0);
+                    let clear_rgba = [clear.x, clear.y, clear.z, clear.w];
+                    match super::virtual_gpu::headless_clip_rect() {
+                        // Repintado parcial de verdad: se limpia y se rasteriza
+                        // sólo el daño, y lo de fuera son los pixeles del frame
+                        // anterior, que siguen ahí.
+                        Some((cx0, cy0, cx1, cy1)) => {
+                            fb.clear_rect(clear_rgba, 1.0, cx0, cy0, cx1, cy1);
+                        }
+                        // Sin daño declarado, o framebuffer nuevo: pantalla entera.
+                        None => fb.clear(clear_rgba, 1.0),
                     }
                     profile.framebuffer_ms += fb_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -1004,7 +1043,8 @@ impl Cx {
                             None
                         },
                     );
-                    results.push((window_id.id(), fb));
+                    stored[idx] = Some(fb);
+                    results.push(idx);
                 }
                 CxDrawPassParent::DrawPass(_dep_pass_id) => {
                     // TODO: render-to-texture passes
@@ -1037,6 +1077,10 @@ impl Cx {
         for texture_id in converted_textures {
             self.textures[texture_id].take_updated();
         }
+
+        // Devolver los framebuffers al almacén: son los pixeles que el frame que
+        // viene conservará fuera de su daño.
+        self.os.framebuffers = stored;
 
         // Hand the conversions back for the next frame to reuse.
         self.os.texture_conversions = texture_cache;

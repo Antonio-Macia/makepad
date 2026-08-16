@@ -15,8 +15,36 @@
 //
 // `MAKEPAD_HEADLESS_CLIP=x,y,w,h` en píxeles de dispositivo.
 
+/// Suspende el recorte por daño mientras no haya un frame anterior que conservar.
+///
+/// # Por qué hace falta
+///
+/// El daño dice «esto es lo único que ha cambiado», y esa frase **presupone que
+/// lo demás sigue en pantalla**. En el primer frame, y tras cada redimensión, no
+/// sigue: el framebuffer acaba de nacer. Si el recorte se aplicara igualmente,
+/// todo lo de fuera del rectángulo no se pintaría nunca — ni en ese frame ni en
+/// ninguno, porque los siguientes tampoco lo tocan.
+///
+/// Se destapó midiendo (2026-08-16): con el framebuffer persistente ya puesto,
+/// presentar la pantalla entera en vez de sólo el daño daba **904.000 píxeles de
+/// diferencia** sobre 1.024.000. O sea que el framebuffer «persistente» estaba
+/// conservando, fielmente, un vacío.
+static CLIP_SUSPENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Enciende o apaga la suspensión del recorte. La llama el renderizador al
+/// decidir si el framebuffer de la ventana se reutiliza o es nuevo.
+pub fn set_clip_suspended(suspended: bool) {
+    CLIP_SUSPENDED.store(suspended, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Rectángulo de recorte global `(x0, y0, x1, y1)` inclusivo-exclusivo, o `None`.
+///
+/// Devuelve `None` —o sea, «pinta entero»— mientras el recorte esté suspendido
+/// (ver [`set_clip_suspended`]), aunque la variable de entorno esté puesta.
 pub fn headless_clip_rect() -> Option<(i32, i32, i32, i32)> {
+    if CLIP_SUSPENDED.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
     static CLIP: std::sync::OnceLock<Option<(i32, i32, i32, i32)>> = std::sync::OnceLock::new();
     *CLIP.get_or_init(|| {
         let raw = std::env::var("MAKEPAD_HEADLESS_CLIP").ok()?;
