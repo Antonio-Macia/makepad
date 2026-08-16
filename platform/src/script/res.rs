@@ -460,12 +460,36 @@ impl Cx {
                             return;
                         }
                     }
-                } else if let Some(result) = load_file_direct(&res.abs_path) {
-                    res.data = match result {
-                        Ok(data) => CxScriptResourceData::Loaded(data),
-                        Err(e) => CxScriptResourceData::Error(e),
-                    };
-                    return;
+                } else {
+                    // Sin modo empaquetado: primero la ruta absoluta de
+                    // compilación, que es lo de siempre y lo que funciona en la
+                    // máquina que compiló.
+                    if let Some(Ok(data)) = load_file_direct(&res.abs_path) {
+                        res.data = CxScriptResourceData::Loaded(data);
+                        return;
+                    }
+                    // Y si no está —o sea, en CUALQUIER otro ordenador—, junto
+                    // al ejecutable.
+                    //
+                    // ⚠ ESTE `else` ES LA MITAD QUE IMPORTA, y faltaba en el
+                    // primer intento. El fallback vivía solo dentro de
+                    // `load_packaged_resource`, a la que únicamente se llega con
+                    // `MAKEPAD_PACKAGE_DIR` puesta. O sea que seguía exigiendo
+                    // la variable de compilación: justo la pieza que no avisa
+                    // cuando falta, porque el binario sale bien y se ejecuta
+                    // bien donde se compiló.
+                    //
+                    // Con esto, dejar el árbol de recursos junto al ejecutable
+                    // basta, sin configurar nada. El orden garantiza que no
+                    // cambia nada de lo que ya funcionaba: la ruta de
+                    // compilación sigue ganando cuando existe.
+                    #[cfg(not(target_os = "android"))]
+                    if let Some(dep_path) = res.dependency_path.as_deref() {
+                        if let Some(data) = load_packaged_resource(self, dep_path) {
+                            res.data = CxScriptResourceData::Loaded(data);
+                            return;
+                        }
+                    }
                 }
             }
 
