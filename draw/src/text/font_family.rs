@@ -2,7 +2,7 @@ use {
     super::{
         font::Font,
         intern::Intern,
-        shaper::{Direction, Ems, ShapeParams, ShapedText, Shaper},
+        shaper::{BaseDirection, Ems, ShapeParams, ShapedText, Shaper},
         substr::Substr,
     },
     std::{
@@ -47,7 +47,9 @@ impl FontFamily {
         self.shaper.borrow_mut().get_or_shape(ShapeParams {
             text,
             fonts: self.fonts.clone(),
-            direction: Direction::default(),
+            // `Auto`: the family has no idea what language it is being asked
+            // to shape, so the paragraph level comes from the text itself.
+            direction: BaseDirection::default(),
             letter_spacing: Ems(0.0),
             word_spacing: Ems(0.0),
             features: Rc::new(Vec::new()),
