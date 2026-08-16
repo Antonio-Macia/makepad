@@ -171,11 +171,10 @@ impl Cx {
         0
     }
 
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    pub fn share_texture_for_presentable_image(
-        &mut self,
-        _texture: &crate::Texture,
-    ) -> Option<crate::os::shared_framebuf::LinuxOwnedImage> {
-        None
-    }
+    // NOTA (ATLAS/H0): la variante Linux de `share_texture_for_presentable_image`
+    // devolvía `Option<LinuxOwnedImage>`, un tipo que sólo existe cuando se
+    // compila el backend Linux real (DMA-BUF). Bajo `headless` ese tipo ya no se
+    // compila (ver shared_framebuf.rs), y además no hay nada que compartir: el
+    // framebuffer es memoria normal del proceso. Por eso aquí no hay variante
+    // Linux; el swapchain compartido usa el camino de "plataforma no soportada".
 }

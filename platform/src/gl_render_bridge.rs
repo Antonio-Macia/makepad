@@ -1,23 +1,28 @@
+//! NOTA (ATLAS/H0): este puente GL sólo tiene sentido cuando hay un contexto
+//! gráfico real. Bajo el backend `headless` (rasterizado por CPU) `os::linux`
+//! ni siquiera se compila, así que todas las variantes linux/android llevan
+//! `not(headless)` y queda activa la implementación de relleno (no-op) de más
+//! abajo.
 use std::ffi::c_void;
 
 #[cfg(any(
-    target_os = "linux",
-    target_os = "android",
+    all(target_os = "linux", not(headless)),
+    all(target_os = "android", not(headless)),
     target_os = "windows",
     all(target_os = "macos", not(headless)),
     all(target_os = "ios", not(headless))
 ))]
 use crate::cx::Cx;
 #[cfg(any(
-    target_os = "linux",
-    target_os = "android",
+    all(target_os = "linux", not(headless)),
+    all(target_os = "android", not(headless)),
     target_os = "windows",
     all(target_os = "macos", not(headless)),
     all(target_os = "ios", not(headless))
 ))]
 use crate::texture::Texture;
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(all(any(target_os = "linux", target_os = "android"), not(headless)))]
 use crate::os::linux::gl_sys;
 
 /// GL API type.
@@ -39,7 +44,7 @@ pub enum GlApi {
 /// - Windows: ANGLE EGL context on makepad's D3D11 device (via libEGL.dll)
 /// - macOS: standalone CGL context bridged to Metal via IOSurface
 pub struct GlRenderBridge {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[cfg(all(any(target_os = "linux", target_os = "android"), not(headless)))]
     pub(crate) inner: crate::os::linux::opengl::EglRenderBridge,
     #[cfg(target_os = "windows")]
     pub(crate) inner: crate::os::windows::angle::AngleRenderBridge,
@@ -50,8 +55,8 @@ pub struct GlRenderBridge {
 }
 
 #[cfg(any(
-    target_os = "linux",
-    target_os = "android",
+    all(target_os = "linux", not(headless)),
+    all(target_os = "android", not(headless)),
     target_os = "windows",
     all(target_os = "macos", not(headless)),
     all(target_os = "ios", not(headless))
@@ -74,8 +79,8 @@ impl GlRenderBridge {
 }
 
 #[cfg(not(any(
-    target_os = "linux",
-    target_os = "android",
+    all(target_os = "linux", not(headless)),
+    all(target_os = "android", not(headless)),
     target_os = "windows",
     all(target_os = "macos", not(headless)),
     all(target_os = "ios", not(headless))
@@ -93,7 +98,11 @@ impl GlRenderBridge {
 }
 
 // EGL platform accessors (Linux, Android, Windows)
-#[cfg(any(target_os = "linux", target_os = "android", target_os = "windows"))]
+#[cfg(any(
+    all(target_os = "linux", not(headless)),
+    all(target_os = "android", not(headless)),
+    target_os = "windows"
+))]
 impl GlRenderBridge {
     pub fn egl_display(&self) -> *mut c_void {
         self.inner.egl_display()
@@ -121,7 +130,7 @@ impl GlRenderBridge {
 }
 
 // Cx methods: Linux
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(headless)))]
 impl Cx {
     /// Create a GL rendering bridge wrapping makepad's existing EGL context.
     pub fn create_gl_render_bridge(&mut self) -> GlRenderBridge {
@@ -188,7 +197,7 @@ impl Cx {
 }
 
 // Cx methods: Android
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", not(headless)))]
 impl Cx {
     /// Create a GL rendering bridge wrapping makepad's existing EGL context.
     pub fn create_gl_render_bridge(&mut self) -> GlRenderBridge {

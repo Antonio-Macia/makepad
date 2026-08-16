@@ -24,12 +24,12 @@ fn ref_array_to_array_of_refs<T, const N: usize>(ref_array: &[T; N]) -> [&T; N] 
 // ============================================================================
 use crate::texture::Texture;
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(all(target_os = "linux", not(target_env = "ohos"), not(headless)))]
 const LINUX_SOFTWARE_FALLBACK_DRM_FOURCC: u32 = 0;
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(all(target_os = "linux", not(target_env = "ohos"), not(headless)))]
 const LINUX_SOFTWARE_FALLBACK_DRM_MODIFIERS: u64 = u64::MAX;
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(all(target_os = "linux", not(target_env = "ohos"), not(headless)))]
 #[derive(Debug)]
 pub struct LinuxSharedSoftwareBuffer {
     fd: std::os::fd::OwnedFd,
@@ -38,7 +38,7 @@ pub struct LinuxSharedSoftwareBuffer {
     pub stride: u32,
 }
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(all(target_os = "linux", not(target_env = "ohos"), not(headless)))]
 impl LinuxSharedSoftwareBuffer {
     pub fn create(len: usize, stride: u32) -> std::io::Result<Self> {
         use std::os::fd::{AsRawFd, FromRawFd};
@@ -132,7 +132,7 @@ impl LinuxSharedSoftwareBuffer {
     }
 }
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(all(target_os = "linux", not(target_env = "ohos"), not(headless)))]
 impl Drop for LinuxSharedSoftwareBuffer {
     fn drop(&mut self) {
         let _ = unsafe {
@@ -145,7 +145,7 @@ impl Drop for LinuxSharedSoftwareBuffer {
 pub struct HostPresentableImage {
     pub id: PresentableImageId,
     pub texture: Texture,
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(all(target_os = "linux", not(target_env = "ohos"), not(headless)))]
     pub software_buffer: Option<LinuxSharedSoftwareBuffer>,
 }
 
@@ -182,7 +182,7 @@ impl HostSwapchain {
                             initial: true,
                         },
                     ),
-                    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+                    #[cfg(all(target_os = "linux", not(target_env = "ohos"), not(headless)))]
                     software_buffer: None,
                 }
             }),
@@ -246,10 +246,17 @@ pub fn shared_swapchain_get_image(
     swapchain.presentable_images.iter().find(|pi| pi.id == id)
 }
 
+// NOTA (ATLAS/H0): todas las rutas "linux" de este fichero llevan además
+// `not(headless)`. El backend `headless` (rasterizador por software, sin GPU)
+// NO compila `os::linux`, así que cualquier referencia a `crate::os::linux::*`
+// —libc_sys::mmap, dma_buf::DrmFormat, ipc— no existe en esa configuración.
+// Bajo `headless` entra en su lugar el camino "fallback for unsupported
+// platforms" de más abajo, que es justo lo que queremos: sin swapchain
+// compartida ni DMA-BUF, el framebuffer vive en memoria del proceso.
 // ============================================================================
 // Linux: DMA-BUF-based swapchain
 // ============================================================================
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(all(target_os = "linux", not(target_env = "ohos"), not(headless)))]
 #[derive(Debug)]
 pub struct LinuxOwnedImagePlane {
     pub dma_buf_fd: std::os::fd::OwnedFd,
@@ -257,14 +264,14 @@ pub struct LinuxOwnedImagePlane {
     pub stride: u32,
 }
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(all(target_os = "linux", not(target_env = "ohos"), not(headless)))]
 #[derive(Debug)]
 pub struct LinuxOwnedImage {
     pub drm_format: crate::os::linux::dma_buf::DrmFormat,
     pub plane: LinuxOwnedImagePlane,
 }
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(all(target_os = "linux", not(target_env = "ohos"), not(headless)))]
 impl LinuxOwnedImage {
     pub fn is_software_fallback(&self) -> bool {
         self.drm_format.fourcc == LINUX_SOFTWARE_FALLBACK_DRM_FOURCC
@@ -286,21 +293,21 @@ impl LinuxOwnedImage {
     }
 }
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(all(target_os = "linux", not(target_env = "ohos"), not(headless)))]
 #[derive(Debug)]
 pub struct LinuxPresentableImage {
     pub id: PresentableImageId,
     pub image: LinuxOwnedImage,
 }
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(all(target_os = "linux", not(target_env = "ohos"), not(headless)))]
 #[derive(Debug)]
 pub enum SharedSwapchainCreateError {
     AuxChannelSend(std::io::Error),
     SoftwareFallback(std::io::Error),
 }
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(all(target_os = "linux", not(target_env = "ohos"), not(headless)))]
 pub fn shared_presentable_image_recv_fds_from_aux_chan(
     image: SharedPresentableImage,
     client_endpoint: &aux_chan::ClientEndpoint,
@@ -313,7 +320,7 @@ pub fn shared_presentable_image_recv_fds_from_aux_chan(
     })
 }
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(all(target_os = "linux", not(target_env = "ohos"), not(headless)))]
 fn software_fallback_image(
     host_image: &mut HostPresentableImage,
     alloc_width: u32,
@@ -360,7 +367,7 @@ fn software_fallback_image(
     Ok(LinuxOwnedImage::software_fallback(send_fd, stride))
 }
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(all(target_os = "linux", not(target_env = "ohos"), not(headless)))]
 pub fn shared_swapchain_from_host_swapchain(
     host: &mut HostSwapchain,
     cx: &mut crate::cx::Cx,
@@ -423,6 +430,13 @@ pub fn shared_swapchain_from_host_swapchain(
 // ============================================================================
 // Fallback for unsupported platforms
 // ============================================================================
+// NOTA (ATLAS/H0): Linux queda FUERA de este fallback aunque se compile en
+// `headless`. Motivo: la forma de `SharedPresentableImage` la fija el crate
+// `makepad-studio-protocol`, que sólo mira `target_os` y no conoce el cfg
+// `headless`; en Linux ese struct siempre tiene el campo `image:
+// LinuxSharedImage`, mientras que este fallback construye el `_dummy` de las
+// plataformas sin swapchain. Para linux+headless hay una función propia justo
+// debajo que rellena la forma Linux con ceros.
 #[cfg(not(any(
     all(target_os = "linux", not(target_env = "ohos")),
     target_os = "macos",
@@ -444,7 +458,41 @@ pub fn shared_swapchain_from_host_swapchain(
 }
 
 /// Auxiliary communication channel, besides stdin (only on Linux).
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+/// Variante linux + `headless`: no existe DMA-BUF ni canal auxiliar porque no
+/// hay backend de ventanas; el framebuffer del rasterizador por software vive
+/// en memoria del propio proceso. Se devuelve la estructura con la *forma* que
+/// exige el protocolo de studio en Linux, rellena de ceros, sólo para que el
+/// código común compile. Nadie la consume en esta configuración.
+#[cfg(all(target_os = "linux", not(target_env = "ohos"), headless))]
+pub fn shared_swapchain_from_host_swapchain(
+    host: &HostSwapchain,
+    _cx: &mut crate::cx::Cx,
+) -> SharedSwapchain {
+    use makepad_studio_protocol::shared_framebuf::{
+        AuxChannedImageFd, DrmFormat, LinuxSharedImage, LinuxSharedImagePlane,
+    };
+    SharedSwapchain {
+        window_id: host.window_id,
+        alloc_width: host.alloc_width,
+        alloc_height: host.alloc_height,
+        presentable_images: std::array::from_fn(|i| SharedPresentableImage {
+            id: host.presentable_images[i].id,
+            image: LinuxSharedImage {
+                drm_format: DrmFormat {
+                    fourcc: 0,
+                    modifiers: 0,
+                },
+                plane: LinuxSharedImagePlane {
+                    dma_buf_fd: AuxChannedImageFd { _private: None },
+                    offset: 0,
+                    stride: 0,
+                },
+            },
+        }),
+    }
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos"), not(headless)))]
 pub mod aux_chan {
     use super::*;
     use crate::os::linux::ipc::{self as linux_ipc, FixedSizeEncoding};
@@ -653,7 +701,7 @@ pub mod aux_chan {
         })
     }
 }
-#[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+#[cfg(not(all(target_os = "linux", not(target_env = "ohos"), not(headless))))]
 pub mod aux_chan {
     use std::io;
 

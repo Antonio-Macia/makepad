@@ -130,10 +130,20 @@ pub(crate) struct CachedTextureConversion {
 
 pub(crate) type TextureConversionCache = HashMap<usize, CachedTextureConversion>;
 
+/// Convierte (o recupera de caché) una textura al formato RGBA-f32 que espera
+/// el shader generado, y devuelve `[ptr, len, ancho, alto]`.
+///
+/// `already_converted_this_frame`: si la textura YA se convirtió durante este
+/// mismo frame, se ignora su flag `updated` y se sirve la caché. Sin esto, el
+/// atlas de glifos —que llega marcado como "sucio" y sólo lo limpia la subida a
+/// GPU, que aquí no existe— se reconvertía entero en cada uno de los ~48
+/// draw-calls de texto de una pantalla de Brasa. El contenido no cambia a mitad
+/// de frame: el atlas se rellena en la fase de `draw`, no durante el rasterizado.
 fn headless_texture_info(
     texture_index: usize,
     cxtexture: &crate::texture::CxTexture,
     cache: &mut TextureConversionCache,
+    already_converted_this_frame: bool,
 ) -> Option<[usize; 4]> {
     match &cxtexture.format {
         TextureFormat::VecMipRGBAf32 {
@@ -174,8 +184,14 @@ fn headless_texture_info(
                     signature: sig,
                     rgba: Vec::new(),
                 });
-            if entry.signature != sig || !updated.is_empty() || entry.rgba.is_empty() {
+            if entry.signature != sig
+                || (!updated.is_empty() && !already_converted_this_frame)
+                || entry.rgba.is_empty()
+            {
                 entry.signature = sig;
+                TEXTURE_CONVERSIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                TEXTURE_CONVERTED_PX
+                    .fetch_add(*width * *height, std::sync::atomic::Ordering::Relaxed);
                 entry.rgba.clear();
                 entry.rgba.reserve(data.len() * 4);
                 for &pixel in data {
@@ -216,8 +232,14 @@ fn headless_texture_info(
                     signature: sig,
                     rgba: Vec::new(),
                 });
-            if entry.signature != sig || !updated.is_empty() || entry.rgba.is_empty() {
+            if entry.signature != sig
+                || (!updated.is_empty() && !already_converted_this_frame)
+                || entry.rgba.is_empty()
+            {
                 entry.signature = sig;
+                TEXTURE_CONVERSIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                TEXTURE_CONVERTED_PX
+                    .fetch_add(*width * *height, std::sync::atomic::Ordering::Relaxed);
                 entry.rgba.clear();
                 entry.rgba.reserve(expected.saturating_mul(4));
                 for &pixel in data.iter().take(expected) {
@@ -259,8 +281,14 @@ fn headless_texture_info(
                     signature: sig,
                     rgba: Vec::new(),
                 });
-            if entry.signature != sig || !updated.is_empty() || entry.rgba.is_empty() {
+            if entry.signature != sig
+                || (!updated.is_empty() && !already_converted_this_frame)
+                || entry.rgba.is_empty()
+            {
                 entry.signature = sig;
+                TEXTURE_CONVERSIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                TEXTURE_CONVERTED_PX
+                    .fetch_add(*width * *height, std::sync::atomic::Ordering::Relaxed);
                 entry.rgba.clear();
                 entry.rgba.reserve(expected * 4);
                 for &byte in data.iter().take(expected) {
@@ -298,8 +326,14 @@ fn headless_texture_info(
                     signature: sig,
                     rgba: Vec::new(),
                 });
-            if entry.signature != sig || !updated.is_empty() || entry.rgba.is_empty() {
+            if entry.signature != sig
+                || (!updated.is_empty() && !already_converted_this_frame)
+                || entry.rgba.is_empty()
+            {
                 entry.signature = sig;
+                TEXTURE_CONVERSIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                TEXTURE_CONVERTED_PX
+                    .fetch_add(*width * *height, std::sync::atomic::Ordering::Relaxed);
                 entry.rgba.clear();
                 entry.rgba.reserve(expected * 4);
                 for &v in data.iter().take(expected) {
@@ -640,9 +674,11 @@ impl Cx {
                     self.passes[*draw_pass_id].set_dpi_factor(dpi_factor);
                     self.passes[*draw_pass_id].set_time(time as f32);
 
+                    let fb_start = std::time::Instant::now();
                     let mut fb = Framebuffer::new(width, height);
                     let clear = self.passes[*draw_pass_id].clear_color;
                     fb.clear([clear.x, clear.y, clear.z, clear.w], 1.0);
+                    profile.framebuffer_ms += fb_start.elapsed().as_secs_f64() * 1000.0;
 
                     self.headless_draw_pass(
                         *draw_pass_id,
@@ -650,6 +686,7 @@ impl Cx {
                         parallel_min_tris,
                         &mut fb,
                         &mut texture_cache,
+                        &mut converted_textures,
                         if profile_enabled {
                             Some(&mut profile)
                         } else {
@@ -687,6 +724,15 @@ impl Cx {
                 profile.raster_ms,
                 profile.texture_ms
             );
+            let convs = TEXTURE_CONVERSIONS.swap(0, std::sync::atomic::Ordering::Relaxed);
+            let conv_px = TEXTURE_CONVERTED_PX.swap(0, std::sync::atomic::Ordering::Relaxed);
+            crate::log!(
+                "[headless][profile] texture={:.1}ms framebuffer={:.1}ms conversiones={} px_convertidos={}",
+                profile.texture_ms,
+                profile.framebuffer_ms,
+                convs,
+                conv_px
+            );
         }
 
         results
@@ -699,6 +745,7 @@ impl Cx {
         parallel_min_tris: usize,
         fb: &mut Framebuffer,
         texture_cache: &mut TextureConversionCache,
+        converted_textures: &mut Vec<crate::texture::TextureId>,
         mut profile: Option<&mut RenderProfile>,
     ) {
         let draw_list_id = match self.passes[draw_pass_id].main_draw_list_id {
@@ -718,6 +765,7 @@ impl Cx {
             parallel_min_tris,
             fb,
             texture_cache,
+            converted_textures,
             profile.as_deref_mut(),
         );
     }
@@ -732,6 +780,7 @@ impl Cx {
         parallel_min_tris: usize,
         fb: &mut Framebuffer,
         texture_cache: &mut TextureConversionCache,
+        converted_textures: &mut Vec<crate::texture::TextureId>,
         mut profile: Option<&mut RenderProfile>,
     ) {
         let only_shader = std::env::var("MAKEPAD_HEADLESS_ONLY_SHADER").ok();
@@ -766,6 +815,7 @@ impl Cx {
                     parallel_min_tris,
                     fb,
                     texture_cache,
+                    converted_textures,
                     profile.as_deref_mut(),
                 );
                 continue;
