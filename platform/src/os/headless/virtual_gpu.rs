@@ -80,6 +80,54 @@ impl Framebuffer {
         }
     }
 
+    /// Convierte a RGBA8 **sólo el rectángulo de recorte**, reutilizando `out`.
+    ///
+    /// 🔴 POR QUÉ EXISTE. `to_rgba8()` convierte la pantalla ENTERA y reserva un
+    /// `Vec` nuevo en cada frame. Medido en ATLAS/H0 a 1280×720: **9-12 ms por
+    /// frame**, sin importar que el daño sea de 100×20 píxeles. Con un ciclo
+    /// completo de 16,5 ms, eso era **más de la mitad del presupuesto de 60 Hz
+    /// gastado en volver a convertir píxeles que no habían cambiado** — la misma
+    /// clase de defecto que la caché de texturas que nunca acertaba: trabajo de
+    /// pantalla completa dentro de un repintado parcial.
+    ///
+    /// `out` se conserva entre frames a propósito: lo de fuera del recorte es
+    /// justamente lo que NO hay que volver a tocar.
+    ///
+    /// ⚠ Ojo a lo que esto NO arregla: el `Framebuffer` sí se recrea y se limpia
+    /// en cada frame, así que el recorte sigue siendo un instrumento de medida y
+    /// no seguimiento de daño de verdad. Para eso hace falta además que el
+    /// framebuffer persista.
+    pub fn to_rgba8_into(&self, out: &mut Vec<u8>, clip: Option<(i32, i32, i32, i32)>) {
+        let needed = self.width * self.height * 4;
+        if out.len() != needed {
+            out.clear();
+            out.resize(needed, 0);
+        }
+        let (x0, y0, x1, y1) = match clip {
+            Some((x0, y0, x1, y1)) => (
+                x0.max(0) as usize,
+                y0.max(0) as usize,
+                (x1.max(0) as usize).min(self.width),
+                (y1.max(0) as usize).min(self.height),
+            ),
+            None => (0, 0, self.width, self.height),
+        };
+        for y in y0..y1 {
+            let fila = y * self.width;
+            for x in x0..x1 {
+                let c = &self.color[fila + x];
+                // premultiplicado → sin premultiplicar, para la salida
+                let a = c[3].clamp(0.0, 1.0);
+                let inv_a = if a > 0.0 { 1.0 / a } else { 0.0 };
+                let base = (fila + x) * 4;
+                out[base] = ((c[0] * inv_a).clamp(0.0, 1.0) * 255.0).round() as u8;
+                out[base + 1] = ((c[1] * inv_a).clamp(0.0, 1.0) * 255.0).round() as u8;
+                out[base + 2] = ((c[2] * inv_a).clamp(0.0, 1.0) * 255.0).round() as u8;
+                out[base + 3] = (a * 255.0).round() as u8;
+            }
+        }
+    }
+
     pub fn to_rgba8(&self) -> Vec<u8> {
         let mut out = vec![0u8; self.width * self.height * 4];
         for (i, c) in self.color.iter().enumerate() {

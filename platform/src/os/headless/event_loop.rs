@@ -576,7 +576,20 @@ impl Cx {
             // `MAKEPAD_HEADLESS_NO_PNG=1` para medir sin ese ruido.
             let profile_on = std::env::var("MAKEPAD_HEADLESS_PROFILE").is_ok();
             let conv_start = std::time::Instant::now();
-            let rgba = fb.to_rgba8();
+            // Buffer de salida PERSISTENTE: lo de fuera del daño no se vuelve a
+            // convertir, que es justo el punto. Antes se reservaba un `Vec` nuevo
+            // (3,7 MB a 1280×720) y se convertía la pantalla entera en cada frame.
+            let rgba = {
+                use std::cell::RefCell;
+                thread_local! {
+                    static SALIDA: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+                }
+                SALIDA.with(|b| {
+                    let mut b = b.borrow_mut();
+                    fb.to_rgba8_into(&mut b, crate::os::headless::virtual_gpu::headless_clip_rect());
+                    b.clone()
+                })
+            };
             let conv_ms = conv_start.elapsed().as_secs_f64() * 1000.0;
             if std::env::var("MAKEPAD_HEADLESS_NO_PNG").is_ok() {
                 if profile_on {
