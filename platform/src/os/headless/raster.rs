@@ -825,6 +825,31 @@ impl Cx {
             }
         }
 
+        // Consumir la marca de "sucio" de las texturas que se han convertido en
+        // este frame.
+        //
+        // 🔴 ESTE ERA EL DEFECTO, y costaba mas de la mitad del frame en un
+        // repintado por dano. TODOS los backends reales llaman a `take_updated()`
+        // al subir la textura a la GPU (opengl.rs:2372, vulkan.rs:5271,
+        // d3d11.rs:1499, metal.rs:2014, web_gl.rs:95); el backend por software
+        // NO lo hacia. Resultado: la textura quedaba marcada como pendiente PARA
+        // SIEMPRE, la condicion `!updated.is_empty()` se cumplia en cada frame, y
+        // la cache de conversion NO PODIA ACERTAR NUNCA -- reconvertia el atlas de
+        // glifos entero (2048x2048 = 4,19 M pixeles) en cada frame.
+        //
+        // Medido antes del arreglo: `conversiones=1 px_convertidos=4194304` en los
+        // 8 frames de una corrida, tanto a pantalla completa como con recorte. Los
+        // contadores se reinician por frame (`swap(0)`), asi que eso era una
+        // conversion COMPLETA por frame, no una en total.
+        //
+        // Se hace aqui, al cerrar el frame, y no en el sitio de la conversion,
+        // porque alli la textura se tiene prestada en INMUTABLE. `converted_textures`
+        // ya venia recorriendo el arbol de dibujo con la lista exacta: solo faltaba
+        // usarla.
+        for texture_id in converted_textures {
+            self.textures[texture_id].take_updated();
+        }
+
         // Hand the conversions back for the next frame to reuse.
         self.os.texture_conversions = texture_cache;
 
