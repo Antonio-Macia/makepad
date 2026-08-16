@@ -73,11 +73,39 @@ impl Default for Ems {
     }
 }
 
-/// Text direction for shaping.
+/// The direction of a single already-resolved run of text.
+///
+/// This is an output of the Unicode Bidirectional Algorithm, not a request:
+/// by the time a value of this type exists, the run's direction is known. The
+/// caller-facing knob is [`BaseDirection`].
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Default)]
 pub enum Direction {
     #[default]
     Ltr,
+    Rtl,
+}
+
+/// The paragraph embedding level a caller asks for.
+///
+/// Kept separate from [`Direction`] on purpose. The two look alike but mean
+/// opposite things: this one is a *request* that may say "work it out", while
+/// `Direction` is an *answer* that is always one or the other. Folding them
+/// into one enum forces every consumer of a resolved run to handle an "auto"
+/// case that cannot happen there.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Default)]
+pub enum BaseDirection {
+    /// Derive the level from the text, per rules P2 and P3 of the Unicode
+    /// Bidirectional Algorithm: use the direction of the first strong
+    /// character, and fall back to left-to-right if there is none.
+    ///
+    /// This is the default because a UI toolkit is handed strings without
+    /// being told their language. Forcing a level is only correct when the
+    /// caller genuinely knows it.
+    #[default]
+    Auto,
+    /// Force a left-to-right paragraph embedding level.
+    Ltr,
+    /// Force a right-to-left paragraph embedding level.
     Rtl,
 }
 
@@ -187,8 +215,11 @@ impl Shaper {
                 // run in its resolved direction keeps mixed LTR/RTL strings
                 // from stomping on each other visually.
                 let default_level = match params.direction {
-                    Direction::Ltr => Some(unicode_bidi::Level::ltr()),
-                    Direction::Rtl => Some(unicode_bidi::Level::rtl()),
+                    // `None` is what asks unicode-bidi to apply rules P2/P3
+                    // and derive the level from the first strong character.
+                    BaseDirection::Auto => None,
+                    BaseDirection::Ltr => Some(unicode_bidi::Level::ltr()),
+                    BaseDirection::Rtl => Some(unicode_bidi::Level::rtl()),
                 };
                 let bidi = unicode_bidi::ParagraphBidiInfo::new(text, default_level);
                 if bidi.is_pure_ltr {
@@ -468,7 +499,7 @@ pub struct Settings {
 pub struct ShapeParams {
     pub text: Substr,
     pub fonts: Rc<[Rc<Font>]>,
-    pub direction: Direction,
+    pub direction: BaseDirection,
     pub letter_spacing: Ems,
     pub word_spacing: Ems,
     /// OpenType feature tag/value pairs for shaping.
@@ -490,4 +521,90 @@ pub struct ShapedGlyph {
     pub advance_in_ems: f32,
     pub offset_in_ems: f32,
     pub y_offset_in_ems: f32,
+}
+
+#[cfg(test)]
+mod bidi_tests {
+    use super::*;
+
+    /// Resolves the paragraph embedding level the same way `shape` does, so the
+    /// test exercises the actual decision rather than a copy of it.
+    fn paragraph_level(text: &str, direction: BaseDirection) -> unicode_bidi::Level {
+        let default_level = match direction {
+            BaseDirection::Auto => None,
+            BaseDirection::Ltr => Some(unicode_bidi::Level::ltr()),
+            BaseDirection::Rtl => Some(unicode_bidi::Level::rtl()),
+        };
+        unicode_bidi::ParagraphBidiInfo::new(text, default_level).paragraph_level
+    }
+
+    /// An Arabic sentence must get a right-to-left paragraph level on its own.
+    ///
+    /// This is the regression this change exists for. With a forced LTR level
+    /// the words still shape and join correctly — which is why the bug survived:
+    /// the text looks right at a glance. What lands on the wrong side is the
+    /// trailing punctuation and any mixed content, because those take the
+    /// paragraph level and not the level of the run they sit next to.
+    #[test]
+    fn arabic_paragraph_resolves_to_rtl() {
+        assert!(paragraph_level("مرحبا بالعالم", BaseDirection::Auto).is_rtl());
+        assert!(paragraph_level("שלום עולם", BaseDirection::Auto).is_rtl());
+        assert!(paragraph_level("سلام دنیا", BaseDirection::Auto).is_rtl());
+    }
+
+    /// The failing case in one assertion: what the old hard-coded level did.
+    #[test]
+    fn forcing_ltr_is_what_used_to_break_arabic() {
+        assert!(!paragraph_level("مرحبا بالعالم", BaseDirection::Ltr).is_rtl());
+    }
+
+    /// A number or a URL after Arabic text is exactly where the old behaviour
+    /// showed: neutral and weak characters resolve against the paragraph level.
+    #[test]
+    fn arabic_with_trailing_neutrals_still_resolves_rtl() {
+        assert!(paragraph_level("مرحبا بالعالم (2026)!", BaseDirection::Auto).is_rtl());
+        assert!(paragraph_level("مرحبا https://example.com", BaseDirection::Auto).is_rtl());
+    }
+
+    /// Auto must not change anything for text that was already fine, which is
+    /// every other language the toolkit renders.
+    #[test]
+    fn auto_leaves_ltr_text_alone() {
+        for text in [
+            "Hello, world!",
+            "Hola — ¿qué tal?",
+            "Привет мир",
+            "Ελληνικά",
+            "你好世界",
+            "こんにちは",
+            "안녕하세요",
+            "สวัสดีชาวโลก",
+            "नमस्ते दुनिया",
+            "",
+            "123 (456)",
+            "🔥 😀",
+        ] {
+            assert!(
+                !paragraph_level(text, BaseDirection::Auto).is_rtl(),
+                "{text:?} must stay left-to-right"
+            );
+        }
+    }
+
+    /// P2 says the level comes from the FIRST strong character, so an Arabic
+    /// name inside an otherwise English sentence must not flip the paragraph.
+    #[test]
+    fn a_first_strong_ltr_character_wins() {
+        assert!(!paragraph_level("Name: مرحبا", BaseDirection::Auto).is_rtl());
+        // …and the mirror case: leading neutrals are skipped, so the Arabic
+        // still decides here.
+        assert!(paragraph_level("\"مرحبا\" said the sign", BaseDirection::Auto).is_rtl());
+    }
+
+    /// A caller that genuinely knows the direction can still force it.
+    #[test]
+    fn forcing_still_works_both_ways() {
+        assert!(paragraph_level("Hello", BaseDirection::Rtl).is_rtl());
+        assert!(!paragraph_level("مرحبا", BaseDirection::Ltr).is_rtl());
+    }
 }
