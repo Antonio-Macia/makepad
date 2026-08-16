@@ -478,6 +478,76 @@ fn run_band_jobs(fb: &mut Framebuffer, jobs: &[BandJob], bands: usize) {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Cobertura ya calculada de UNA instancia (un glifo) dentro de su cuadrado.
+///
+/// 🔴 POR QUÉ EXISTE. El shader de texto evalúa las curvas del glifo **por
+/// píxel**, y con derivadas se invoca **tres veces** por fragmento (dx, dy y
+/// centro). Medido en ATLAS/H0: ~11.500 ns/fragmento frente a ~30 ns de los
+/// `sdf` — con el 1 % de los fragmentos se comía el 57 % del rasterizado.
+///
+/// Es la técnica clásica de los motores 2D desde los noventa: **rasterizar el
+/// glifo UNA vez y luego copiarlo**. Un `memcpy` mueve un píxel en ~0,2 ns; aquí
+/// se calculaba uno en 11.500.
+///
+/// La clave garantiza la corrección POR CONSTRUCCIÓN: entra el hash de TODOS los
+/// varyings de los vértices de la instancia más el tamaño entero del cuadrado y
+/// su desplazamiento subpíxel. Dos instancias con la misma clave producen, en el
+/// mismo píxel local, exactamente el mismo resultado — no hay que saber qué slot
+/// guarda qué.
+struct GlyphTile {
+    w: usize,
+    h: usize,
+    /// `None` = ese píxel local aún no se ha calculado. Se llena perezosamente
+    /// porque las bandas reparten FILAS: cada banda calcula sólo las suyas.
+    px: Vec<Option<[f32; 4]>>,
+}
+
+/// Clave estable de una instancia de texto. Ver [`GlyphTile`].
+fn glyph_key(
+    varyings: &[f32],
+    v_off: usize,
+    varying_slots: usize,
+    vertex_count: usize,
+    sub_x: f32,
+    sub_y: f32,
+    w: usize,
+    h: usize,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for v in 0..vertex_count {
+        let base = v_off + v * varying_slots;
+        if base + varying_slots > varyings.len() {
+            return 0;
+        }
+        for f in &varyings[base..base + varying_slots] {
+            f.to_bits().hash(&mut hasher);
+        }
+    }
+    // Subpíxel cuantizado a 1/8: un glifo en x=100,3 no cubre igual que en
+    // x=100,7, así que si no entrara en la clave la caché mentiría.
+    ((sub_x * 8.0).round() as i32).hash(&mut hasher);
+    ((sub_y * 8.0).round() as i32).hash(&mut hasher);
+    w.hash(&mut hasher);
+    h.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// ¿Está encendido el memo de glifos? (`MAKEPAD_HEADLESS_GLYPH_MEMO`)
+///
+/// Apagado por defecto: hoy no acierta (ver `GlyphTile`) y encenderlo sólo añade
+/// trabajo. Existe para que el siguiente que lo retome mida en vez de suponer.
+fn glyph_memo_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("MAKEPAD_HEADLESS_GLYPH_MEMO").is_ok())
+}
+
+/// Contadores del memo de glifos (diagnóstico, se reinician por frame).
+pub(crate) static GLYPH_MEMO_HITS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+pub(crate) static GLYPH_MEMO_MISS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 fn rasterize_instances_rows(
     color_chunk: &mut [[f32; 4]],
     depth_chunk: &mut [f32],
@@ -520,8 +590,84 @@ fn rasterize_instances_rows(
     let mut debug_text_prints = 0usize;
     let mut raster_scratch = RasterScratch::default();
 
+    // Memo de glifos: vive por LLAMADA, o sea por banda y por hilo. No hace falta
+    // candado ni `thread_local`, y encaja con el reparto por filas: el texto de
+    // una línea cae en la misma banda, que es justo donde se repiten las letras.
+    let mut glyph_memo: std::collections::HashMap<u64, GlyphTile> =
+        std::collections::HashMap::new();
+
     for inst_idx in 0..instance_count {
         let inst_base = inst_idx * vertex_count;
+
+        // Caja envolvente de la INSTANCIA (no del triángulo): un glifo son dos
+        // triángulos y la caché se indexa por su cuadrado completo.
+        let mut tile: Option<(u64, i32, i32, usize, usize)> = None;
+        // 🔴 APAGADO POR DEFECTO — experimento incompleto, ver `GlyphTile`.
+        // Medido el 2026-08-16: se activa bien (cajas de 7×10 px, glifos reales)
+        // pero da **0 aciertos de 23.384**, porque la clave incluye TODOS los
+        // varyings del vértice y esos llevan la POSICIÓN EN PANTALLA: la misma
+        // letra en dos sitios distintos son claves distintas. Encendido sólo
+        // cuesta (un hash por instancia y una tabla que nunca acierta), así que
+        // se deja tras una variable hasta que la clave sepa distinguir la
+        // identidad del glifo de su posición.
+        if is_draw_text_shader && glyph_memo_enabled() {
+            let (mut mnx, mut mny, mut mxx, mut mxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+            let mut ok = true;
+            for v in 0..vertex_count {
+                match shaded_positions.get(inst_base + v) {
+                    Some(p) => {
+                        // 🔴 Las posiciones vienen en espacio de RECORTE (-1..1),
+                        // no en píxeles. Sin esta conversión la caja salía de 1×1
+                        // en el origen (-1,-1) y la comprobación de límites
+                        // fallaba SIEMPRE: el memo no llegaba a activarse ni una
+                        // vez, y ni siquiera contaba el fallo. Misma fórmula que
+                        // `ndc_to_screen` de `virtual_gpu.rs`, incluido el volteo
+                        // de Y y la división por w.
+                        let inv_w = if p[3] != 0.0 { 1.0 / p[3] } else { 1.0 };
+                        let sx = ((p[0] * inv_w) * 0.5 + 0.5) * width as f32;
+                        let sy = (1.0 - ((p[1] * inv_w) * 0.5 + 0.5)) * height as f32;
+                        mnx = mnx.min(sx);
+                        mny = mny.min(sy);
+                        mxx = mxx.max(sx);
+                        mxy = mxy.max(sy);
+                    }
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok && mxx > mnx && mxy > mny {
+                let x0 = mnx.floor() as i32;
+                let y0 = mny.floor() as i32;
+                let w = ((mxx.ceil() as i32) - x0).max(1) as usize;
+                let h = ((mxy.ceil() as i32) - y0).max(1) as usize;
+                // Glifos desmesurados no se cachean: serían baldosas enormes con
+                // pocas repeticiones, o sea memoria a cambio de nada.
+                if std::env::var("MAKEPAD_HEADLESS_GLYPH_DEBUG").is_ok() {
+                    static UNA: std::sync::atomic::AtomicUsize =
+                        std::sync::atomic::AtomicUsize::new(0);
+                    if UNA.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 5 {
+                        eprintln!("[glifo] bbox w={w} h={h} x0={x0} y0={y0} verts={vertex_count} slots={varying_slots}");
+                    }
+                }
+                if w <= 256 && h <= 256 {
+                    let key = glyph_key(
+                        shaded_varyings,
+                        inst_base * varying_slots,
+                        varying_slots,
+                        vertex_count,
+                        mnx - x0 as f32,
+                        mny - y0 as f32,
+                        w,
+                        h,
+                    );
+                    if key != 0 {
+                        tile = Some((key, x0, y0, w, h));
+                    }
+                }
+            }
+        }
         for tri_idx in 0..tri_count {
             let i0 = indices[tri_idx * 3] as usize;
             let i1 = indices[tri_idx * 3 + 1] as usize;
@@ -652,6 +798,48 @@ fn rasterize_instances_rows(
                     } else {
                         Some([0.0, 0.0, 0.0, 0.0])
                     }
+                };
+
+                // ── Memo de glifos ────────────────────────────────────────
+                // Envuelve al shader: si este píxel local de ESTE glifo ya se
+                // calculó, se copia; si no, se calcula una vez y se guarda.
+                // Correcto por construcción (ver `GlyphTile`): misma clave +
+                // mismo píxel local ⇒ mismo resultado.
+                let memo_ref = &mut glyph_memo;
+                let mut frag_closure = |varyings: &[f32],
+                                        derivs: &TriangleDerivatives,
+                                        lane_x: u32,
+                                        lane_y: u32,
+                                        x: i32,
+                                        y: i32|
+                 -> Option<[f32; 4]> {
+                    let Some((key, x0, y0, tw, th)) = tile else {
+                        return frag_closure(varyings, derivs, lane_x, lane_y, x, y);
+                    };
+                    let (lx, ly) = (x - x0, y - y0);
+                    if lx < 0 || ly < 0 || lx as usize >= tw || ly as usize >= th {
+                        return frag_closure(varyings, derivs, lane_x, lane_y, x, y);
+                    }
+                    let idx = ly as usize * tw + lx as usize;
+                    if let Some(t) = memo_ref.get(&key) {
+                        if let Some(Some(c)) = t.px.get(idx) {
+                            GLYPH_MEMO_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            return Some(*c);
+                        }
+                    }
+                    GLYPH_MEMO_MISS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let out = frag_closure(varyings, derivs, lane_x, lane_y, x, y);
+                    if let Some(c) = out {
+                        let t = memo_ref.entry(key).or_insert_with(|| GlyphTile {
+                            w: tw,
+                            h: th,
+                            px: vec![None; tw * th],
+                        });
+                        if t.w == tw && t.h == th {
+                            t.px[idx] = Some(c);
+                        }
+                    }
+                    out
                 };
 
                 rasterize_triangle_rows(
@@ -871,6 +1059,15 @@ impl Cx {
                 profile.vertex_ms,
                 profile.raster_ms,
                 profile.texture_ms
+            );
+            let gm_hit = GLYPH_MEMO_HITS.swap(0, std::sync::atomic::Ordering::Relaxed);
+            let gm_miss = GLYPH_MEMO_MISS.swap(0, std::sync::atomic::Ordering::Relaxed);
+            let gm_total = gm_hit + gm_miss;
+            crate::log!(
+                "[headless][profile] glifos: aciertos={} fallos={} tasa={:.1}%",
+                gm_hit,
+                gm_miss,
+                if gm_total > 0 { 100.0 * gm_hit as f64 / gm_total as f64 } else { 0.0 }
             );
             let convs = TEXTURE_CONVERSIONS.swap(0, std::sync::atomic::Ordering::Relaxed);
             let conv_px = TEXTURE_CONVERTED_PX.swap(0, std::sync::atomic::Ordering::Relaxed);
