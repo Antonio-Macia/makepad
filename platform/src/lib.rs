@@ -108,7 +108,7 @@ pub use {
         audio::*,
         component::{ComponentInfo, ComponentRegistries, ComponentRegistry},
         cursor::MouseCursor,
-        cx::{Cx, CxRef, LinuxWindowParams, OsType},
+        cx::{Cx, CxRef, LinuxWindowParams, OsType, ReadingDirection},
         cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, CxThreadPriority, OpenUrlInPlace},
         display_context::{DisplayContext, SystemBarAppearance},
         draw_list::{CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId},
