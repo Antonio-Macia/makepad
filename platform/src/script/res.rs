@@ -204,9 +204,75 @@ fn load_packaged_resource(cx: &Cx, dep_path: &str) -> Option<Rc<Vec<u8>>> {
     not(all(target_os = "macos", apple_bundle))
 ))]
 fn load_packaged_resource(cx: &Cx, dep_path: &str) -> Option<Rc<Vec<u8>>> {
-    let root = cx.package_root.as_deref()?;
-    let full_path = format!("{}/{}", root, dep_path);
-    let mut file = File::open(&full_path).ok()?;
+    if let Some(root) = cx.package_root.as_deref() {
+        if let Some(data) = leer(&format!("{}/{}", root, dep_path)) {
+            return Some(data);
+        }
+    }
+    // Último recurso: junto al ejecutable. Ver `resource_dirs_next_to_exe`.
+    for dir in resource_dirs_next_to_exe() {
+        if let Some(data) = leer(&format!("{}/{}", dir, dep_path)) {
+            return Some(data);
+        }
+    }
+    None
+}
+
+/// Directories to look for packaged resources in, relative to the running
+/// executable, tried in order.
+///
+/// ## Why this exists
+///
+/// Without it, a desktop build finds its fonts and icons **only on the machine
+/// that compiled it**. Resource paths are resolved against the crate's
+/// `CARGO_MANIFEST_DIR`, which on another computer is a directory that does not
+/// exist — there is no user called `Anton`, no `.cargo`, no checkout. The window
+/// opens, the background paints, and not one character appears. Reproduced by
+/// running an already-built binary with the cargo checkout hidden.
+///
+/// A packaged mode does exist (`MAKEPAD_PACKAGE_DIR`), but using it means
+/// getting three things right at once, none of which reports failure:
+///
+/// 1. setting the variable at build time;
+/// 2. copying the resource tree into the package;
+/// 3. **forcing a rebuild of this crate** — the variable is read with
+///    `option_env!`, so a warm `target` silently reuses a build that never saw
+///    it. `cargo:rerun-if-env-changed` is not enough.
+///
+/// Step 3 is the one that bites: it depends on the state of the build cache, so
+/// the same commands work on one machine and not on another. It cost a real
+/// project a shipped package that looked fine on the machine that built it.
+///
+/// With this fallback, dropping the resource tree beside the executable is
+/// enough, which is what every desktop packager does anyway. Nothing has to be
+/// configured, and nothing fails silently.
+///
+/// The lookup is last, after the dependency table and the explicit package root,
+/// so it can never take precedence over a deliberate configuration.
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(any(target_os = "android", target_os = "ios", target_os = "tvos")),
+    not(all(target_os = "macos", apple_bundle))
+))]
+fn resource_dirs_next_to_exe() -> Vec<String> {
+    let Ok(exe) = std::env::current_exe() else {
+        return Vec::new();
+    };
+    let Some(dir) = exe.parent() else {
+        return Vec::new();
+    };
+    let dir = dir.to_string_lossy().replace('\\', "/");
+    // `makepad/` first because it matches the layout every other platform
+    // already uses (Android assets, the Apple bundle, wasm), so a packager that
+    // knows one knows them all. Beside the binary as well, for the simplest case
+    // of "unzip and run".
+    vec![format!("{dir}/makepad"), dir]
+}
+
+/// Read a file, or `None` if it is not there.
+#[cfg(not(target_arch = "wasm32"))]
+fn leer(ruta: &str) -> Option<Rc<Vec<u8>>> {
+    let mut file = File::open(ruta).ok()?;
     let mut data = Vec::new();
     file.read_to_end(&mut data).ok()?;
     Some(Rc::new(data))
