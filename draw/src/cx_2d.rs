@@ -123,10 +123,15 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         Self::pack_draw_call_group(self.draw_call_parent_stack[0], 0)
     }
 
-    pub fn will_redraw(&self, draw_list_2d: &mut DrawList2d, walk: Walk) -> bool {
+    pub fn will_redraw(&mut self, draw_list_2d: &mut DrawList2d, walk: Walk) -> bool {
         // ok so we need to check if our turtle position has changed since last time.
         // if it did, we redraw
         let rect = self.peek_walk_turtle(walk);
+        // Subir el rectángulo al lado de plataforma, que es donde vive el render.
+        // makepad ya lo calcula aquí para decidir si repintar; lo que faltaba era
+        // que el rasterizador pudiera leerlo, porque «qué listas se repintan» sin
+        // «dónde están» no permite calcular el daño. Ver `CxDrawList::painted_rect`.
+        self.cx.draw_lists[draw_list_2d.draw_list.id()].painted_rect = Some(rect);
         if draw_list_2d.dirty_check_rect != rect {
             draw_list_2d.dirty_check_rect = rect;
             return true;

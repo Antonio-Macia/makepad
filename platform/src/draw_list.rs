@@ -615,6 +615,19 @@ pub struct CxDrawList {
     pub draw_list_has_clip: bool,
 
     pub os: CxOsDrawList,
+    /// Caja que ocupa esta draw list en la pantalla, en coordenadas lógicas.
+    ///
+    /// Es el `dirty_check_rect` de su `DrawList2d` —el rectángulo del turtle con
+    /// el que makepad ya decide si la lista hay que repintarla— subido al lado de
+    /// plataforma, donde vive el render. Sin esto, el rasterizador sabe QUÉ listas
+    /// se repintan pero no DÓNDE están, que es justo lo que necesita el cálculo de
+    /// daño (`os/headless/damage.rs`).
+    ///
+    /// ⚠ NO confundir con `rect_areas`: aquélla es la contabilidad de áreas
+    /// ALINEADAS (texto, hit-testing) y no contiene los fondos ni la mayoría de lo
+    /// pintado. Usarla como fuente del daño da un rectángulo demasiado pequeño, y
+    /// el resultado no es un error sino píxeles sin refrescar.
+    pub painted_rect: Option<Rect>,
     pub rect_areas: Vec<CxRectArea>,
     pub find_appendable_draw_shader_check: Vec<u64>,
 }

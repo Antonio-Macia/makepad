@@ -1016,6 +1016,33 @@ impl Cx {
                     // agujero de la primera versión de esto.
                     super::virtual_gpu::set_clip_suspended(!reutilizable);
 
+                    // Daño calculado del árbol de dibujo. Se publica ANTES de
+                    // limpiar, porque el borrado ya lo consulta.
+                    if super::damage::damage_enabled() {
+                        // El tracker se saca del `Cx` para poder pasarle el `Cx`
+                        // en inmutable: necesita leer el árbol de draw lists, y
+                        // vive dentro de ese mismo `Cx`.
+                        let mut tracker = std::mem::take(&mut self.os.damage);
+                        let d = tracker.calcular(self, dpi_factor, width as i32, height as i32);
+                        self.os.damage = tracker;
+                        super::virtual_gpu::set_damage_rect(d.map(|r| (r.x0, r.y0, r.x1, r.y1)));
+                        if profile_enabled {
+                            match d {
+                                Some(r) => crate::log!(
+                                    "[headless][profile] daño={}x{} en ({},{}) = {:.1}% de la pantalla",
+                                    r.x1 - r.x0,
+                                    r.y1 - r.y0,
+                                    r.x0,
+                                    r.y0,
+                                    100.0 * r.area() as f64 / (width * height) as f64
+                                ),
+                                None => crate::log!(
+                                    "[headless][profile] daño=PANTALLA ENTERA"
+                                ),
+                            }
+                        }
+                    }
+
                     let clear = self.passes[*draw_pass_id].clear_color;
                     let clear_rgba = [clear.x, clear.y, clear.z, clear.w];
                     match super::virtual_gpu::headless_clip_rect() {

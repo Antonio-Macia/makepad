@@ -235,6 +235,14 @@ impl Cx {
         // texto, construcción de draw-lists). Va aparte porque el repintado
         // parcial NO la ahorra: es coste por frame, no por píxel.
         let draw_ev_start = std::time::Instant::now();
+        // 🔴 ANTES de `call_draw_event`, que vacía `new_draw_event` con un
+        // `mem::swap`: es la única ventana en la que se puede saber QUÉ se va a
+        // repintar. Después ya no existe el dato.
+        if crate::os::headless::damage::damage_enabled() {
+            let ev = std::mem::take(&mut self.new_draw_event);
+            self.os.damage.observar(&ev);
+            self.new_draw_event = ev;
+        }
         self.call_draw_event(time_now);
         if std::env::var("MAKEPAD_HEADLESS_PROFILE").is_ok() {
             crate::log!(
