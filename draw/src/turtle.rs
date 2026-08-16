@@ -2693,6 +2693,24 @@ pub struct Layout {
     #[live]
     pub padding: Inset,
 
+    /// Whether this turtle mirrors when the interface reads right to left.
+    ///
+    /// `true` by default, which is what almost everything wants. Set it to
+    /// `false` for content whose left-to-right order carries meaning of its own
+    /// and does NOT follow the reading direction:
+    ///
+    /// - media transport controls (▶ points where time advances, not where the
+    ///   text goes),
+    /// - clocks, timelines and time-series charts,
+    /// - musical notation,
+    /// - code and terminal output,
+    /// - a logo or wordmark.
+    ///
+    /// Without this escape hatch the exceptions end up as scattered conditionals
+    /// in widget code, which is the shape of debt that never gets paid.
+    #[live(true)]
+    pub mirror: bool,
+
     /// The alignment of each walk with respect to their turtle's rectangle.
     #[live]
     pub align: Align,
@@ -2789,6 +2807,8 @@ impl Default for Layout {
             clip_x: true,
             clip_y: true,
             padding: Inset::default(),
+            // Casi todo se espeja; lo que no, lo declara a mano (ver el campo).
+            mirror: true,
             align: Align::default(),
             distribute: Distribute::default(),
             flow: Flow::default(),
@@ -3009,6 +3029,13 @@ pub enum Distribute {
 pub struct Turtle {
     walk: Walk,
     layout: Layout,
+    /// Dirección de lectura CUANDO SE CREÓ este turtle.
+    ///
+    /// Se copia del `Cx` al empezar, en vez de consultarse cada vez, por dos
+    /// motivos: `Turtle` no alcanza el `Cx` desde sus métodos (`padding()` es
+    /// uno, históricamente), y así el layout de un árbol que ya empezó a medirse no puede
+    /// cambiar de sentido a mitad.
+    rtl: bool,
     width: f64,
     height: f64,
     used_width: f64,
@@ -3058,6 +3085,11 @@ impl Turtle {
     }
 
     /// Returns the padding around the inner rectangle of each walk of this turtle.
+    ///
+    /// En una interfaz de derecha a izquierda NO se intercambia aquí: la
+    /// tortuga se coloca de izquierda a derecha con su padding de siempre y el
+    /// reflejo de cierre (ver `reflejo_en_caja`) lleva el hueco del principio
+    /// al borde derecho junto con todo lo demás.
     pub fn padding(&self) -> Inset {
         self.layout.padding
     }
@@ -3747,6 +3779,12 @@ pub struct FinishedWalk {
     /// The size of the outer rectangle of this finished walk.
     outer_size: Vec2d,
 
+    /// Where its outer rectangle started in X when it was walked.
+    ///
+    /// Its final X is this plus whatever the close-time pass moves it, which is
+    /// what the right-to-left mirror needs to reflect it inside the box.
+    origin_x: f64,
+
     /// Whether this walk participates in normal flow and distribution.
     in_flow: bool,
 
@@ -3816,6 +3854,27 @@ fn row_align_x_shift(
     let gaps = spacing * walks.len().saturating_sub(1) as f64;
     let used: f64 = walks.iter().map(|w| w.outer_size.x).sum::<f64>() + gaps;
     align_x * (inner_width - used).max(0.0)
+}
+
+/// Cuánto hay que mover en X un hijo para reflejarlo dentro de su tortuga.
+///
+/// Es TODA la aritmética del espejo de derecha a izquierda. La fila se coloca
+/// primero de izquierda a derecha exactamente como siempre —flex, `distribute`,
+/// `align.x`, rellenos—, y luego cada hijo se refleja respecto al centro de la
+/// caja interior: lo que quedó a `d` del borde izquierdo queda a `d` del
+/// derecho. Esa única operación invierte el orden, lleva el bloque al otro
+/// borde (`align.x: 0` pasa a «pegado a la derecha») y da la vuelta al reparto
+/// de `distribute`, sin que ninguno de los tres tenga que saber del idioma.
+///
+/// Mueve CAJAS, nunca píxeles: el texto, las imágenes y los iconos se
+/// recolocan pero no se dan la vuelta.
+///
+/// `caja_izq` y `caja_ancho` son los del rectángulo entero de la tortuga, con
+/// su padding: así el hueco del principio acaba en el borde derecho. `x` y
+/// `ancho`, los del hijo.
+fn reflejo_en_caja(caja_izq: f64, caja_ancho: f64, x: f64, ancho: f64) -> f64 {
+    // Destino: caja_izq + caja_ancho - (x - caja_izq) - ancho.
+    2.0 * caja_izq + caja_ancho - 2.0 * x - ancho
 }
 
 /// The vertical counterpart of [`row_align_x_shift`] for a `Flow::Down` column.
@@ -4508,6 +4567,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             .push(AlignEntry::BeginClip(dvec2(0.0, 0.0), size));
 
         let turtle = Turtle {
+            rtl: self.cx.cx.reading_direction.is_rtl(),
             walk: Walk::fixed(size.x, size.y),
             layout,
             align_start: self.align_list.len() - 1,
@@ -4613,6 +4673,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             .push(AlignEntry::BeginClip(clip_min, clip_max));
 
         let turtle = Turtle {
+            rtl: self.cx.cx.reading_direction.is_rtl(),
             walk,
             layout,
             align_start: self.align_list.len() - 1,
@@ -4702,6 +4763,20 @@ impl<'a, 'b> Cx2d<'a, 'b> {
 
         // The walk this turtle's baseline comes from moves too, so its shift is kept.
         let baseline_walk = self.turtle().baseline_walk;
+
+        // Espejo de derecha a izquierda: cada hijo en flujo se refleja dentro
+        // del rectángulo ENTERO de la tortuga DESPUÉS de que la pasada lo coloque
+        // de izquierda a derecha (ver `reflejo_en_caja`). Vale para filas,
+        // columnas y superpuestos: como cada hijo se refleja por su cuenta, una
+        // columna no se desparrama (el espejo viejo, que reflejaba el TRAMO
+        // ocupado, sí la desparramaba y por eso se limitaba a las filas). Un
+        // ancho desconocido (NaN) no se refleja: reflejar con él no deja la
+        // fila torcida, la deja fuera de la pantalla.
+        let espejo = {
+            let turtle = self.turtle();
+            (turtle.rtl && turtle.layout.mirror && scope_rect.size.x.is_finite())
+                .then_some((scope_rect.pos.x, scope_rect.size.x))
+        };
         let mut baseline_dy = 0.0;
 
         // Close-time placement is one normalized pass. Every align-list range
@@ -4774,6 +4849,14 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                     if Some(index) == baseline_walk {
                         baseline_dy = cross;
                     }
+                    let main = match espejo {
+                        Some((caja_izq, caja_ancho)) if in_flow => {
+                            let walk = &self.finished_walks[index];
+                            let x = walk.origin_x + main;
+                            main + reflejo_en_caja(caja_izq, caja_ancho, x, walk.outer_size.x)
+                        }
+                        _ => main,
+                    };
                     let range_end = self.finished_walk_align_list_end(index);
                     self.move_align_list(range_start, range_end, main, cross, false);
                 }
@@ -4828,6 +4911,14 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                             group.map_or(0.0, |group| group.offset(distribute, rank))
                         } else {
                             0.0
+                        };
+                        let dx = match espejo {
+                            Some((caja_izq, caja_ancho)) if in_flow => {
+                                let walk = &self.finished_walks[index];
+                                let x = walk.origin_x + dx;
+                                dx + reflejo_en_caja(caja_izq, caja_ancho, x, walk.outer_size.x)
+                            }
+                            _ => dx,
                         };
                         let range_end = self.finished_walk_align_list_end(index);
                         self.move_align_list(range_start, range_end, dx, 0.0, false);
@@ -4901,6 +4992,14 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                     if Some(index) == baseline_walk {
                         baseline_dy = main;
                     }
+                    let cross = match espejo {
+                        Some((caja_izq, caja_ancho)) if in_flow => {
+                            let walk = &self.finished_walks[index];
+                            let x = walk.origin_x + cross;
+                            cross + reflejo_en_caja(caja_izq, caja_ancho, x, walk.outer_size.x)
+                        }
+                        _ => cross,
+                    };
                     let range_end = self.finished_walk_align_list_end(index);
                     self.move_align_list(range_start, range_end, cross, main, false);
                 }
@@ -4910,6 +5009,13 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                     let walk = &self.finished_walks[index];
                     let dx = align.x * (inner_effective_width - walk.outer_size.x).max(0.0);
                     let dy = align.y * (inner_effective_height - walk.outer_size.y).max(0.0);
+                    let dx = match espejo {
+                        Some((caja_izq, caja_ancho)) if walk.in_flow => {
+                            let x = walk.origin_x + dx;
+                            dx + reflejo_en_caja(caja_izq, caja_ancho, x, walk.outer_size.x)
+                        }
+                        _ => dx,
+                    };
                     if Some(index) == baseline_walk {
                         baseline_dy = dy;
                     }
@@ -5172,6 +5278,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                 align_list_start,
                 deferred_before_count: 0,
                 outer_size: size + walk.margin.size(),
+                origin_x: outer_origin.x,
                 in_flow,
                 flow_index,
                 metrics: walk.metrics,
@@ -5230,6 +5337,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                 align_list_start,
                 deferred_before_count: defer_index,
                 outer_size,
+                origin_x: outer_origin.x,
                 in_flow: true,
                 flow_index,
                 metrics: walk.metrics,
@@ -5515,6 +5623,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             align_list_start,
             deferred_before_count: turtle.deferred_fills.len(),
             outer_size: rect.size,
+            origin_x: rect.pos.x,
             in_flow: true,
             flow_index,
             metrics,
@@ -6438,3 +6547,194 @@ impl LiveHook for Size {
         }
     }
 }*/
+
+#[cfg(test)]
+mod rtl_tests {
+    use super::*;
+
+    use crate::cx_draw::CxDraw;
+
+    /// Un hijo que el test va a medir: o un walk fijo, o un relleno aplazado
+    /// de verdad (`defer_walk_turtle` + `resolve`), que es como lo hace una
+    /// `View` con `width: Fill` y es el caso que dejaba la pantalla en blanco en
+    /// el S9+ (2026-08-17).
+    #[derive(Clone, Copy)]
+    enum Hijo {
+        Fijo(f64),
+        Relleno,
+    }
+
+    /// Monta una tortuga raíz con la dirección de lectura dada, recorre los
+    /// hijos y devuelve la x FINAL y el ancho de cada uno.
+    ///
+    /// La x final se lee de un marcador que la pasada de cierre mueve igual que
+    /// mueve al hijo (el truco de `tracked_walk` en los tests de upstream): se
+    /// mide lo que se pintaría, no lo que se calculó.
+    fn medir(rtl: bool, tam: Vec2d, layout: Layout, hijos: &[Hijo]) -> Vec<(f64, f64)> {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        if rtl {
+            cx.reading_direction = ReadingDirection::Rtl;
+        }
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(&mut cx, &event);
+        let mut cx = Cx2d::new(&mut draw);
+        cx.begin_root_turtle(tam, layout);
+
+        let mut marcas = vec![usize::MAX; hijos.len()];
+        let mut aplazados = Vec::new();
+        for (i, hijo) in hijos.iter().enumerate() {
+            match *hijo {
+                Hijo::Fijo(a) => marcas[i] = marca(&mut cx, Walk::fixed(a, 10.0)),
+                Hijo::Relleno => aplazados.push((
+                    i,
+                    cx.defer_walk_turtle(Walk::new(Size::fill(), Size::Fixed(10.0)))
+                        .unwrap(),
+                )),
+            }
+        }
+        // Los rellenos se recorren al final, como hace una View: es lo que
+        // deja `finished_walks` fuera del orden visual.
+        for (i, mut aplazado) in aplazados {
+            let walk = aplazado.resolve(&mut cx);
+            marcas[i] = marca(&mut cx, walk);
+        }
+        cx.end_turtle();
+        marcas
+            .iter()
+            .map(|&m| match cx.align_list[m] {
+                AlignEntry::BeginClip(min, max) => (min.x, max.x - min.x),
+                ref otro => panic!("marcador inesperado {otro:?}"),
+            })
+            .collect()
+    }
+
+    fn marca(cx: &mut Cx2d, walk: Walk) -> usize {
+        let rect = cx.walk_turtle(walk);
+        let m = cx.align_list.len();
+        cx.align_list
+            .push(AlignEntry::BeginClip(rect.pos, rect.pos + rect.size));
+        m
+    }
+
+    /// El ORÁCULO: la x en RTL tiene que ser el reflejo, dentro del
+    /// rectángulo de la tortuga, de la x que da la tortuga de UPSTREAM en LTR
+    /// para la misma fila. La de LTR no la escribimos nosotros, así que no es
+    /// una vara de medir hecha a la medida del código que se prueba.
+    fn comprobar_reflejo(tam: Vec2d, layout: Layout, hijos: &[Hijo]) {
+        let ltr = medir(false, tam, layout, hijos);
+        let rtl = medir(true, tam, layout, hijos);
+        for (i, (&(x, w), &(xr, wr))) in ltr.iter().zip(&rtl).enumerate() {
+            assert_eq!(w, wr, "hijo {i}: el espejo no cambia anchos");
+            let esperado = tam.x - x - w;
+            assert!(
+                (xr - esperado).abs() < 1e-6,
+                "hijo {i}: LTR x={x} ancho={w} → RTL esperado {esperado}, salió {xr}"
+            );
+        }
+    }
+
+    /// Tres hijos de anchos distintos pegados al principio: en RTL quedan
+    /// pegados a la DERECHA y en orden inverso.
+    ///
+    /// MUTACIÓN: quitar la suma de `reflejo_en_caja` en el `wrap: false` deja
+    /// las x de LTR y este test sale rojo.
+    #[test]
+    fn una_fila_se_refleja_entera() {
+        let hijos = [Hijo::Fijo(10.0), Hijo::Fijo(30.0), Hijo::Fijo(20.0)];
+        comprobar_reflejo(dvec2(100.0, 50.0), Layout::flow_right(), &hijos);
+        // Y las cifras a mano, para que el oráculo no sea lo único: [10|30|20]
+        // en 100 de ancho → acaban en 90, 60 y 40.
+        let xs: Vec<f64> = medir(true, dvec2(100.0, 50.0), Layout::flow_right(), &hijos)
+            .iter()
+            .map(|p| p.0)
+            .collect();
+        assert_eq!(xs, vec![90.0, 60.0, 40.0]);
+    }
+
+    /// Con un relleno aplazado en medio, el caso del S9+: el relleno conserva
+    /// su sitio, en medio, y su ancho.
+    ///
+    /// MUTACIÓN: guardar `origin_x: 0.0` en el push de walk con `abs_pos` de
+    /// `walk_turtle_internal` (por donde pasa el relleno resuelto) rompe su
+    /// cuenta y este test sale rojo.
+    #[test]
+    fn un_relleno_aplazado_se_queda_en_medio() {
+        let hijos = [Hijo::Fijo(40.0), Hijo::Relleno, Hijo::Fijo(60.0)];
+        comprobar_reflejo(dvec2(200.0, 50.0), Layout::flow_right(), &hijos);
+        // A mano: el relleno mide 100 y en RTL va de 60 a 160.
+        let r = medir(true, dvec2(200.0, 50.0), Layout::flow_right(), &hijos);
+        assert_eq!(r, vec![(160.0, 40.0), (60.0, 100.0), (0.0, 60.0)]);
+    }
+
+    /// El padding del principio va a la derecha, sin intercambiarlo a mano.
+    #[test]
+    fn el_padding_del_principio_va_a_la_derecha() {
+        let layout = Layout {
+            padding: Inset { left: 12.0, right: 4.0, top: 0.0, bottom: 0.0 },
+            ..Layout::flow_right()
+        };
+        let r = medir(true, dvec2(100.0, 50.0), layout, &[Hijo::Fijo(20.0)]);
+        // 100 − 12 de padding − 20 de ancho = 68.
+        assert_eq!(r, vec![(68.0, 20.0)]);
+    }
+
+    /// `distribute: SpaceBetween` y `align.x` también se reflejan.
+    #[test]
+    fn distribute_y_align_tambien_se_reflejan() {
+        let hijos = [Hijo::Fijo(10.0), Hijo::Fijo(20.0)];
+        let between = Layout { distribute: Distribute::SpaceBetween, ..Layout::flow_right() };
+        comprobar_reflejo(dvec2(100.0, 50.0), between, &hijos);
+        let centrado = Layout { align: Align { x: 0.25, y: 0.0 }, ..Layout::flow_right() };
+        comprobar_reflejo(dvec2(100.0, 50.0), centrado, &hijos);
+    }
+
+    /// Una fila que envuelve se refleja fila a fila.
+    ///
+    /// MUTACIÓN: quitar la suma de `reflejo_en_caja` en el `wrap: true` deja
+    /// la segunda fila pegada a la izquierda y este test sale rojo.
+    #[test]
+    fn una_fila_que_envuelve_se_refleja_por_filas() {
+        comprobar_reflejo(
+            dvec2(50.0, 80.0),
+            Layout::flow_right_wrap(),
+            &[Hijo::Fijo(30.0), Hijo::Fijo(30.0)],
+        );
+    }
+
+    /// En una columna cada hijo se refleja por su cuenta: el estrecho va a la
+    /// derecha y ninguno se sale.
+    ///
+    /// MUTACIÓN: quitar la suma de `reflejo_en_caja` en `Flow::Down` deja los
+    /// dos pegados a la izquierda y este test sale rojo.
+    #[test]
+    fn una_columna_lleva_sus_hijos_a_la_derecha() {
+        let hijos = [Hijo::Fijo(30.0), Hijo::Fijo(70.0)];
+        comprobar_reflejo(dvec2(100.0, 50.0), Layout::flow_down(), &hijos);
+        comprobar_reflejo(dvec2(100.0, 50.0), Layout::flow_overlay(), &hijos);
+    }
+
+    /// `mirror: false` no se toca: da lo mismo que en LTR.
+    #[test]
+    fn mirror_false_no_cambia() {
+        let hijos = [Hijo::Fijo(10.0), Hijo::Fijo(20.0)];
+        for layout in [
+            Layout { mirror: false, ..Layout::flow_right() },
+            Layout { mirror: false, ..Layout::flow_down() },
+        ] {
+            assert_eq!(
+                medir(true, dvec2(100.0, 50.0), layout, &hijos),
+                medir(false, dvec2(100.0, 50.0), layout, &hijos)
+            );
+        }
+    }
+
+    /// La aritmética sola: reflejar dos veces devuelve al sitio.
+    #[test]
+    fn reflejar_dos_veces_es_no_hacer_nada() {
+        let (izq, ancho, x, w) = (7.0, 93.0, 31.0, 13.0);
+        let una = x + reflejo_en_caja(izq, ancho, x, w);
+        let dos = una + reflejo_en_caja(izq, ancho, una, w);
+        assert_eq!(dos, x);
+    }
+
+}

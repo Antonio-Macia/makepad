@@ -188,7 +188,7 @@ pub use {
         audio::*,
         component::{ComponentInfo, ComponentRegistries, ComponentRegistry},
         cursor::MouseCursor,
-        cx::{Cx, CxMemoryReport, CxRef, GpuBackend, LinuxWindowParams, OsType},
+        cx::{Cx, CxMemoryReport, CxRef, GpuBackend, LinuxWindowParams, OsType, ReadingDirection},
         cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, CxThreadPriority, HapticFeedback, OpenUrlInPlace, ScreenEdges},
         display_context::{DisplayContext, SystemBarAppearance},
         font_policy::{

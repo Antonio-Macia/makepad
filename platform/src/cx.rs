@@ -61,6 +61,32 @@ pub(crate) struct PendingCameraPlayback {
     pub should_loop: bool,
 }
 
+/// Which way the user's language reads, for the whole interface.
+///
+/// This is a property of the UI as a whole and not of one label: a right-to-left
+/// interface mirrors rows, alignment and padding, not just glyph order. Keeping
+/// it on `Cx` is what lets the layout engine see it without every widget having
+/// to pass it down.
+///
+/// It follows the language and is not a separate switch. Arabic, Hebrew, Persian
+/// and Urdu read right to left; offering the two as independent settings is how
+/// an app ends up in Arabic with a left-to-right layout.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ReadingDirection {
+    /// Left to right — the default, and what every existing app gets.
+    #[default]
+    Ltr,
+    /// Right to left.
+    Rtl,
+}
+
+impl ReadingDirection {
+    /// True when the interface should be mirrored.
+    pub const fn is_rtl(self) -> bool {
+        matches!(self, ReadingDirection::Rtl)
+    }
+}
+
 pub struct Cx {
     pub script_vm: Option<Box<ScriptVmBase>>,
     pub script_data: CxScriptData,
@@ -76,6 +102,12 @@ pub struct Cx {
     pub(crate) font_set_frozen: bool,
 
     pub debug_trace_active: bool,
+
+    /// Which way the interface reads. See [`ReadingDirection`].
+    ///
+    /// Defaults to left-to-right, so nothing changes for an app that never sets
+    /// it. Set it once from the app's locale and the layout follows.
+    pub reading_direction: ReadingDirection,
 
     pub(crate) os_type: OsType,
     pub in_makepad_studio: bool,
@@ -1034,6 +1066,7 @@ impl Cx {
             debug: Default::default(),
 
             debug_trace_active: false,
+            reading_direction: ReadingDirection::default(),
 
             globals: Default::default(),
 
