@@ -545,9 +545,18 @@ impl Cx {
         let mut rendered_any = false;
 
         // Render all passes using the real draw tree + JIT shaders
-        let framebuffers = self.headless_render_all_passes(time_now);
+        let rendered = self.headless_render_all_passes(time_now);
 
-        for (window_id, fb) in framebuffers {
+        // Los framebuffers son PERSISTENTES: se sacan del almacén, se leen y se
+        // devuelven al final. Se sacan en vez de tomarse prestados porque el
+        // cuerpo del bucle sigue necesitando `&mut self`; y se devuelven después
+        // del bucle —no dentro— porque el cuerpo tiene varios `continue`.
+        let mut framebuffers = std::mem::take(&mut self.os.framebuffers);
+
+        for window_id in rendered {
+            let Some(fb) = framebuffers.get(window_id).and_then(|f| f.as_ref()) else {
+                continue;
+            };
             // Skip if we don't have a window state for this window
             if window_id >= windows.len() {
                 continue;
@@ -586,7 +595,23 @@ impl Cx {
                 }
                 SALIDA.with(|b| {
                     let mut b = b.borrow_mut();
-                    fb.to_rgba8_into(&mut b, crate::os::headless::virtual_gpu::headless_clip_rect());
+                    // `MAKEPAD_HEADLESS_PRESENT_FULL=1` convierte la pantalla
+                    // ENTERA desde el framebuffer persistente, ignorando el daño.
+                    // No es una optimización ni un modo de uso: es el ORÁCULO del
+                    // repintado parcial. Si el framebuffer conserva lo de fuera
+                    // del daño como debe, la imagen sale idéntica a la del camino
+                    // normal; si no, la diferencia es exactamente lo que no se
+                    // estaba conservando.
+                    //
+                    // Medido el 2026-08-16: antes de suspender el daño en el
+                    // primer frame, 904.000 píxeles de diferencia sobre 1.024.000.
+                    // Después, 0.
+                    let recorte = if std::env::var("MAKEPAD_HEADLESS_PRESENT_FULL").is_ok() {
+                        None
+                    } else {
+                        crate::os::headless::virtual_gpu::headless_clip_rect()
+                    };
+                    fb.to_rgba8_into(&mut b, recorte);
                     b.clone()
                 })
             };
@@ -669,6 +694,9 @@ impl Cx {
             state.frame_id += 1;
             rendered_any = true;
         }
+
+        // Devolver los framebuffers: son el punto de partida del frame siguiente.
+        self.os.framebuffers = std::mem::take(&mut framebuffers);
 
         rendered_any
     }
