@@ -38,6 +38,37 @@ impl HeadlessShaderJit {
         source_hash: u64,
         source: &str,
     ) -> Result<HeadlessJitOutput, String> {
+        // ── Camino AOT (hito H1) ──────────────────────────────────────────
+        // Si este binario se compiló con `MAKEPAD_HEADLESS_AOT_DIR`, el shader
+        // ya está DENTRO del ejecutable y no hace falta ni `rustc` ni
+        // `dlopen`. Se comprueba ANTES de tocar el disco: es el camino que
+        // debe funcionar en ATLAS, donde el JIT es imposible, y además evita
+        // los ~22 s de compilación del primer frame en el host.
+        if let Some(aot) = super::aot::lookup(source_hash) {
+            let module = HeadlessLoadedModule::Aot(aot);
+            let shader_version = module.shader_version().ok();
+            return Ok(HeadlessJitOutput {
+                // No hay biblioteca en disco; se deja la ruta que TENDRÍA para
+                // que los mensajes de diagnóstico sigan siendo legibles.
+                dylib_path: self.root_dir.join(format!("shader_{source_hash:016x}")),
+                module: Some(module),
+                shader_version,
+                load_error: None,
+            });
+        }
+        // Modo estricto: sirve para VERIFICAR que un binario cubre todos sus
+        // shaders con AOT. Sin él, un shader que falte se compilaría con
+        // `rustc` sin avisar y la prueba de "funciona sin compilador" pasaría
+        // por casualidad en una máquina que sí lo tiene.
+        if std::env::var("MAKEPAD_HEADLESS_AOT_STRICT").is_ok() {
+            return Err(format!(
+                "MAKEPAD_HEADLESS_AOT_STRICT: el shader {source_hash:016x} no está \
+                 precompilado (hay {} empotrados); recompila con \
+                 MAKEPAD_HEADLESS_AOT_DIR apuntando a un volcado completo",
+                super::aot::embedded_count()
+            ));
+        }
+
         let shader_dir = self.root_dir.join(format!("shader_{source_hash:016x}"));
         let cached_path =
             shader_dir.join(format!("shader_{source_hash:016x}.{}", dylib_extension()));
@@ -191,15 +222,76 @@ fn dylib_extension() -> &'static str {
 //   - `dlerror()` no es reentrante ni thread-safe; sólo se llama en el camino de
 //     error, inmediatamente después de la llamada que falló.
 // ─────────────────────────────────────────────────────────────────────────────
+/// Un módulo de shader ejecutable, venga de donde venga.
+///
+/// Las dos procedencias posibles se esconden tras el MISMO interfaz
+/// (`symbol::<F>(nombre)` / `shader_version()`) para que ni `raster.rs` ni
+/// `shader.rs` tengan que saber cuál está en uso:
+///
+/// - [`HeadlessLoadedModule::Dylib`]: compilado con `rustc` en runtime y
+///   cargado con `dlopen`. Es el camino de desarrollo en el host.
+/// - [`HeadlessLoadedModule::Aot`]: empotrado en el propio binario en el build
+///   (ver [`super::aot`]). Es el único camino posible en ATLAS OS, donde no
+///   hay compilador ni cargador dinámico, y el único que no paga el arranque.
+pub enum HeadlessLoadedModule {
+    /// Biblioteca compartida cargada en runtime. Sólo existe de verdad en
+    /// UNIX; en el resto de plataformas `load` falla antes de construirla.
+    Dylib(DylibModule),
+    /// Shader precompilado y enlazado dentro del ejecutable.
+    Aot(&'static super::aot::AotShader),
+}
+
+impl HeadlessLoadedModule {
+    /// Carga una biblioteca de shader desde disco (camino JIT).
+    ///
+    /// El camino AOT no pasa por aquí: se construye directamente en
+    /// [`HeadlessShaderJit::compile_and_load`], porque no hay nada que cargar.
+    pub fn load(path: &Path) -> Result<Self, String> {
+        Ok(Self::Dylib(DylibModule::load(path)?))
+    }
+
+    /// Versión del contrato entre el generador de shaders y el rasterizador.
+    /// Se consulta al cargar para detectar un módulo obsoleto (p. ej. un
+    /// volcado AOT viejo empotrado contra un backend nuevo) antes de que
+    /// produzca basura en pantalla.
+    pub fn shader_version(&self) -> Result<u32, String> {
+        type VersionFn = unsafe extern "C" fn() -> u32;
+        let version_fn: VersionFn = self.symbol("makepad_headless_shader_version")?;
+        Ok(unsafe { version_fn() })
+    }
+
+    /// Resuelve un punto de entrada por nombre y lo devuelve tipado.
+    ///
+    /// # Safety (contrato del llamante, no marcado `unsafe` por herencia del
+    /// interfaz original)
+    ///
+    /// `F` debe ser un puntero a función con EXACTAMENTE la firma que el
+    /// generador emitió para ese nombre. Una firma mal declarada es
+    /// comportamiento indefinido, igual que ya lo era con `dlsym`.
+    pub fn symbol<F: Sized>(&self, symbol: &str) -> Result<F, String> {
+        let ptr: *const () = match self {
+            Self::Dylib(module) => return module.symbol(symbol),
+            Self::Aot(shader) => (shader.resolve)(symbol).ok_or_else(|| {
+                format!(
+                    "symbol `{symbol}` missing in AOT headless shader module {:016x}",
+                    shader.source_hash
+                )
+            })?,
+        };
+        Ok(unsafe { std::mem::transmute_copy::<*const (), F>(&ptr) })
+    }
+}
+
+/// Biblioteca compartida de shader cargada con `dlopen` (camino JIT).
 #[cfg(unix)]
-pub struct HeadlessLoadedModule {
+pub struct DylibModule {
     /// Handle opaco devuelto por `dlopen`. `NonNull` porque un handle nulo es
     /// justo la señal de error de la API POSIX.
     handle: std::ptr::NonNull<c_void>,
 }
 
 #[cfg(unix)]
-impl HeadlessLoadedModule {
+impl DylibModule {
     pub fn load(path: &Path) -> Result<Self, String> {
         const RTLD_NOW: i32 = 2;
         let c_path = CString::new(path.to_string_lossy().as_bytes())
@@ -207,12 +299,6 @@ impl HeadlessLoadedModule {
         let handle = unsafe { dlopen(c_path.as_ptr(), RTLD_NOW) };
         let handle = std::ptr::NonNull::new(handle).ok_or_else(last_dlerror)?;
         Ok(Self { handle })
-    }
-
-    pub fn shader_version(&self) -> Result<u32, String> {
-        type VersionFn = unsafe extern "C" fn() -> u32;
-        let version_fn: VersionFn = self.symbol("makepad_headless_shader_version")?;
-        Ok(unsafe { version_fn() })
     }
 
     pub fn symbol<F: Sized>(&self, symbol: &str) -> Result<F, String> {
@@ -229,7 +315,7 @@ impl HeadlessLoadedModule {
 }
 
 #[cfg(unix)]
-impl Drop for HeadlessLoadedModule {
+impl Drop for DylibModule {
     fn drop(&mut self) {
         unsafe {
             dlclose(self.handle.as_ptr());
@@ -263,24 +349,27 @@ unsafe extern "C" {
     fn dlerror() -> *const std::os::raw::c_char;
 }
 
-// Fallback para plataformas sin `dlfcn.h` (Windows, wasm, y en su día ATLAS):
-// el JIT de shaders no puede funcionar ahí y se reporta como error explícito en
-// vez de fallar de forma silenciosa. En ATLAS la salida prevista NO es
-// implementar esto, sino precompilar los shaders AOT (ver H1 del documento
-// BRASA-BARE-METAL-CAMINO.md).
+// Fallback para plataformas sin `dlfcn.h` (Windows, wasm, y ATLAS): ahí el JIT
+// de shaders no puede funcionar y se reporta como error explícito en vez de
+// fallar de forma silenciosa. Nótese que en esas plataformas el backend NO se
+// queda sin shaders: el camino previsto es el AOT (`super::aot`), que no pasa
+// por esta struct. Ver H1 en `BRASA-BARE-METAL-CAMINO.md`.
 #[cfg(not(unix))]
-pub struct HeadlessLoadedModule;
+pub struct DylibModule;
 
 #[cfg(not(unix))]
-impl HeadlessLoadedModule {
+impl DylibModule {
     pub fn load(path: &Path) -> Result<Self, String> {
         Err(format!(
-            "headless shader dlopen is only implemented on unix for now (`{}`)",
+            "headless shader dlopen is only implemented on unix for now (`{}`); \
+             use MAKEPAD_HEADLESS_AOT_DIR to embed shaders at build time",
             path.display()
         ))
     }
 
-    pub fn shader_version(&self) -> Result<u32, String> {
-        Err("headless shader version lookup is only implemented on unix for now".to_string())
+    pub fn symbol<F: Sized>(&self, symbol: &str) -> Result<F, String> {
+        Err(format!(
+            "headless shader dlsym (`{symbol}`) is only implemented on unix for now"
+        ))
     }
 }

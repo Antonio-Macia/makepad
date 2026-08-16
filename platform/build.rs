@@ -125,6 +125,8 @@ fn main() {
     }
     std::fs::write(Path::new(&out_dir).join("app_icon_gen.rs"), icon_gen).unwrap();
 
+    generate_headless_aot_shaders(&out_dir);
+
     println!("cargo:rustc-check-cfg=cfg(apple_bundle,apple_sim,lines,use_gles_3,use_vulkan,linux_direct,quest,no_android_choreographer,ohos_sim,headless,use_unstable_unix_socket_ancillary_data_2021)");
     println!("cargo:rerun-if-env-changed=MAKEPAD");
     println!("cargo:rerun-if-env-changed=MAKEPAD_PACKAGE_DIR");
@@ -184,4 +186,180 @@ fn main() {
         }
         _ => (),
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AOT de shaders del backend `headless` (hito H1 de BRASA-BARE-METAL-CAMINO.md)
+//
+// POR QUÉ EXISTE (en español, por norma del proyecto):
+//
+// El backend `headless` traduce cada shader de Makepad a código Rust y lo
+// compila EN TIEMPO DE EJECUCIÓN invocando `rustc` como proceso hijo, para
+// luego cargar el `.so` resultante con `dlopen` (ver `os/headless/jit.rs`).
+// Eso funciona en un host de desarrollo, pero es inviable en dos escenarios
+// que sí importan:
+//
+//   1. **ATLAS OS**: dentro del sistema operativo objetivo no hay ni compilador
+//      de Rust ni cargador dinámico, así que el JIT sencillamente no puede
+//      existir. Sin AOT no hay backend por software y, por tanto, no hay
+//      escritorio Makepad+Brasa.
+//   2. **Arranque**: medido en este repo, compilar los 50 shaders de una
+//      pantalla real de Brasa cuesta ~22 segundos en el primer frame. El AOT
+//      los mueve al build, donde se pagan una vez.
+//
+// CÓMO FUNCIONA:
+//
+// Se ejecuta la aplicación UNA VEZ con el JIT activo; éste deja en disco un
+// `shader_<hash>/lib.rs` por shader. Ese directorio se pasa en la siguiente
+// compilación mediante `MAKEPAD_HEADLESS_AOT_DIR`, y este generador empotra
+// cada `lib.rs` como un módulo Rust del propio `makepad-platform`, más una
+// tabla estática `hash -> resolvedor de símbolos`. En runtime,
+// `HeadlessShaderJit::compile_and_load` consulta primero esa tabla y sólo cae
+// al `rustc` si el shader no estaba precompilado.
+//
+// DECISIÓN DE DISEÑO — por qué se quita `#[no_mangle]`:
+//
+// Cada `lib.rs` está pensado como una `cdylib` independiente y exporta sus 11
+// puntos de entrada (`makepad_headless_vertex`, `..._fragment`, los offsets
+// del `RenderCx`, etc.) con `#[no_mangle]`, es decir, con nombre de símbolo
+// global SIN decorar. Al empotrar 50 de esos ficheros en un mismo binario,
+// esos 50×11 símbolos colisionarían y el enlazado fallaría. Se eliminan los
+// `#[no_mangle]`: las funciones siguen siendo `pub extern "C"` y siguen siendo
+// alcanzables por RUTA de módulo (`shader_xxxx::makepad_headless_vertex`), que
+// es justo lo que la tabla generada necesita. Se deja de exportar un símbolo
+// dinámico que nadie iba a buscar por nombre en este modo.
+//
+// La resolución por nombre se conserva (`fn(&str) -> Option<*const ()>`) para
+// que el resto del backend (`raster.rs`, `shader.rs`) siga usando exactamente
+// el mismo interfaz `symbol::<F>("nombre")` que usaba con `dlsym`. El AOT es
+// un reemplazo transparente, no un camino paralelo.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Los 11 puntos de entrada que el generador de shaders puede emitir. No todos
+/// aparecen en todos los shaders (p. ej. `rcx_frag_offset` sólo se emite si el
+/// shader lee el framebuffer), por eso la tabla se construye a partir de lo que
+/// realmente hay en cada fichero y no de esta lista a ciegas.
+const HEADLESS_AOT_ENTRY_POINTS: &[&str] = &[
+    "makepad_headless_shader_version",
+    "makepad_headless_flat_varying_slots",
+    "makepad_headless_uses_derivatives",
+    "makepad_headless_render_cx_size",
+    "makepad_headless_rcx_vary_offset",
+    "makepad_headless_rcx_quad_mode_offset",
+    "makepad_headless_rcx_frag_offset",
+    "makepad_headless_rcx_discard_offset",
+    "makepad_headless_fill_rcx",
+    "makepad_headless_vertex",
+    "makepad_headless_fragment",
+];
+
+/// Genera `$OUT_DIR/headless_aot_gen.rs`.
+///
+/// Si `MAKEPAD_HEADLESS_AOT_DIR` no está definido (el caso normal), emite una
+/// tabla VACÍA: el coste es cero y el backend usa el JIT como siempre. Esto
+/// mantiene la compilación por defecto idéntica a la de upstream.
+fn generate_headless_aot_shaders(out_dir: &str) {
+    println!("cargo:rerun-if-env-changed=MAKEPAD_HEADLESS_AOT_DIR");
+    let gen_path = Path::new(out_dir).join("headless_aot_gen.rs");
+
+    let aot_dir = match env::var("MAKEPAD_HEADLESS_AOT_DIR") {
+        Ok(dir) if !dir.trim().is_empty() => std::path::PathBuf::from(dir),
+        _ => {
+            std::fs::write(&gen_path, "pub static AOT_SHADERS: &[AotShader] = &[];\n").unwrap();
+            return;
+        }
+    };
+    println!("cargo:rerun-if-changed={}", aot_dir.display());
+
+    // Directorio donde se dejan las copias despojadas de `#[no_mangle]`. Vive
+    // en OUT_DIR para que `cargo clean` se lo lleve y para no ensuciar el
+    // volcado original, que es la entrada y debe quedar intacta.
+    let embedded_dir = Path::new(out_dir).join("headless_aot_shaders");
+    std::fs::create_dir_all(&embedded_dir).unwrap();
+
+    // Se ordenan por hash para que la tabla generada sea DETERMINISTA: dos
+    // builds del mismo volcado deben producir el mismo fichero, byte a byte.
+    let mut shaders: Vec<(u64, std::path::PathBuf)> = Vec::new();
+    let entries = match std::fs::read_dir(&aot_dir) {
+        Ok(e) => e,
+        Err(err) => panic!(
+            "MAKEPAD_HEADLESS_AOT_DIR `{}` no se puede leer: {err}",
+            aot_dir.display()
+        ),
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(hex) = name.strip_prefix("shader_") else {
+            continue;
+        };
+        let Ok(hash) = u64::from_str_radix(hex, 16) else {
+            continue;
+        };
+        let lib_rs = entry.path().join("lib.rs");
+        if lib_rs.is_file() {
+            println!("cargo:rerun-if-changed={}", lib_rs.display());
+            shaders.push((hash, lib_rs));
+        }
+    }
+    shaders.sort_by_key(|(hash, _)| *hash);
+
+    let mut gen = String::new();
+    gen.push_str("// GENERADO por platform/build.rs — no editar a mano.\n");
+    let mut table = String::from("pub static AOT_SHADERS: &[AotShader] = &[\n");
+
+    for (hash, lib_rs) in &shaders {
+        let source = std::fs::read_to_string(lib_rs)
+            .unwrap_or_else(|err| panic!("no se puede leer `{}`: {err}", lib_rs.display()));
+        // Se busca el atributo tal cual lo emite el generador de shaders, en su
+        // propia línea. Un `replace` del texto suelto podría tocar una cadena
+        // literal dentro del shader; anclarlo a "línea completa" lo evita.
+        let stripped: String = source
+            .lines()
+            .filter(|line| line.trim() != "#[no_mangle]")
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let module = format!("shader_{hash:016x}");
+        let dest = embedded_dir.join(format!("{module}.rs"));
+        // Sólo se reescribe si cambia: evita invalidar el mtime y forzar
+        // recompilaciones de 50 módulos en cada build.
+        let needs_write = std::fs::read_to_string(&dest)
+            .map(|old| old != stripped)
+            .unwrap_or(true);
+        if needs_write {
+            std::fs::write(&dest, &stripped).unwrap();
+        }
+
+        gen.push_str(&format!(
+            "#[path = r#\"{}\"#]\nmod {module};\n",
+            dest.display()
+        ));
+
+        // Resolvedor por nombre del módulo: sustituye a `dlsym`. Sólo se
+        // enumeran los puntos de entrada realmente presentes en el fichero.
+        gen.push_str(&format!(
+            "fn resolve_{module}(name: &str) -> Option<*const ()> {{\n    Some(match name {{\n"
+        ));
+        for ep in HEADLESS_AOT_ENTRY_POINTS {
+            if source.contains(&format!("fn {ep}(")) {
+                gen.push_str(&format!(
+                    "        \"{ep}\" => {module}::{ep} as *const (),\n"
+                ));
+            }
+        }
+        gen.push_str("        _ => return None,\n    })\n}\n");
+
+        table.push_str(&format!(
+            "    AotShader {{ source_hash: 0x{hash:016x}u64, resolve: resolve_{module} }},\n"
+        ));
+    }
+    table.push_str("];\n");
+    gen.push_str(&table);
+
+    std::fs::write(&gen_path, gen).unwrap();
+    println!(
+        "cargo:warning=makepad headless AOT: {} shaders empotrados desde {}",
+        shaders.len(),
+        aot_dir.display()
+    );
 }
