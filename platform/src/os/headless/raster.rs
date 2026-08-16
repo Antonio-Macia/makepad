@@ -123,6 +123,15 @@ struct TextureConversionSignature {
     data_len: usize,
 }
 
+/// Diagnostic counters: how many REAL conversions (cache misses) happened and
+/// how many pixels they covered. `MAKEPAD_HEADLESS_PROFILE` reads them to tell
+/// "the cache is useless" apart from "the cache works but the atlas keeps
+/// changing" — the two look identical in a per-frame total.
+pub(crate) static TEXTURE_CONVERSIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+pub(crate) static TEXTURE_CONVERTED_PX: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 pub(crate) struct CachedTextureConversion {
     signature: TextureConversionSignature,
     rgba: Vec<f32>,
@@ -364,6 +373,10 @@ struct RenderProfile {
     vertex_ms: f64,
     raster_ms: f64,
     texture_ms: f64,
+    /// Coste de reservar y limpiar el framebuffer, aparte del rasterizado.
+    /// Separado a proposito: en una ventana grande puede dominar el frame, y
+    /// sumado a `raster_ms` haria pensar que lo caro es dibujar.
+    framebuffer_ms: f64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -653,6 +666,10 @@ impl Cx {
 
         let mut results = Vec::new();
         let mut texture_cache = std::mem::take(&mut self.os.texture_conversions);
+        // Texturas ya convertidas EN ESTE frame. Una textura puede usarse en
+        // varias draw calls; sin esto, el atlas de glifos se reconvierte una vez
+        // por llamada en vez de una vez por frame.
+        let mut converted_textures: Vec<crate::texture::TextureId> = Vec::new();
 
         for draw_pass_id in &passes_todo {
             self.passes[*draw_pass_id].paint_dirty = false;
@@ -955,7 +972,12 @@ impl Cx {
                     let texture_id = texture.texture_id();
                     let cxtexture = &self.textures[texture_id];
                     let __tex_t0 = std::time::Instant::now();
-                    let __info = headless_texture_info(texture_id.0, cxtexture, texture_cache);
+                    let __ya = converted_textures.contains(&texture_id);
+                    let __info =
+                        headless_texture_info(texture_id.0, cxtexture, texture_cache, __ya);
+                    if !__ya {
+                        converted_textures.push(texture_id);
+                    }
                     if let Some(p) = profile.as_deref_mut() {
                         p.texture_ms += __tex_t0.elapsed().as_secs_f64() * 1000.0;
                     }
