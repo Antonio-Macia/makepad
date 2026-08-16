@@ -391,6 +391,24 @@ pub struct Layout {
     #[live]
     pub padding: Inset,
 
+    /// Whether this turtle mirrors when the interface reads right to left.
+    ///
+    /// `true` by default, which is what almost everything wants. Set it to
+    /// `false` for content whose left-to-right order carries meaning of its own
+    /// and does NOT follow the reading direction:
+    ///
+    /// - media transport controls (▶ points where time advances, not where the
+    ///   text goes),
+    /// - clocks, timelines and time-series charts,
+    /// - musical notation,
+    /// - code and terminal output,
+    /// - a logo or wordmark.
+    ///
+    /// Without this escape hatch the exceptions end up as scattered conditionals
+    /// in widget code, which is the shape of debt that never gets paid.
+    #[live(true)]
+    pub mirror: bool,
+
     /// The alignment of each walk with respect to their turtle's rectangle.
     #[live]
     pub align: Align,
@@ -478,6 +496,8 @@ impl Default for Layout {
             clip_x: true,
             clip_y: true,
             padding: Inset::default(),
+            // Casi todo se espeja; lo que no, lo declara a mano (ver el campo).
+            mirror: true,
             align: Align::default(),
             flow: Flow::default(),
             spacing: 0.0,
@@ -599,6 +619,13 @@ pub enum RowAlign {
 pub struct Turtle {
     walk: Walk,
     layout: Layout,
+    /// Dirección de lectura CUANDO SE CREÓ este turtle.
+    ///
+    /// Se copia del `Cx` al empezar, en vez de consultarse cada vez, por dos
+    /// motivos: `Turtle` no alcanza el `Cx` desde sus métodos (`padding()` es
+    /// uno), y así el layout de un árbol que ya empezó a medirse no puede
+    /// cambiar de sentido a mitad.
+    rtl: bool,
     width: f64,
     height: f64,
     used_width: f64,
@@ -643,8 +670,22 @@ impl Turtle {
     }
 
     /// Returns the padding around the inner rectangle of each walk of this turtle.
+    ///
+    /// ⚠ En una interfaz de derecha a izquierda, `left` y `right` se
+    /// **intercambian**. Un `padding: {left: 12, right: 8}` no describe dos
+    /// bordes de la pantalla: describe «más hueco por donde empieza el
+    /// contenido», y por dónde empieza depende del idioma. Sin esto, un botón
+    /// con icono y texto sale con el hueco del lado equivocado.
+    ///
+    /// Un turtle con `mirror: false` conserva su padding físico, que es lo que
+    /// quiere quien lo apagó.
     pub fn padding(&self) -> Inset {
-        self.layout.padding
+        let p = self.layout.padding;
+        if self.rtl && self.layout.mirror {
+            Inset { left: p.right, right: p.left, ..p }
+        } else {
+            p
+        }
     }
 
     /// Sets the left padding of this turtle's layout.
@@ -1333,8 +1374,20 @@ pub enum RowAlignRole {
 /// align.x when any exist. But a fill that draws narrower than its slot (an image
 /// that aspect-fits, say) leaves genuine slack, and this reclaims it. Returns 0 when
 /// the content fills the row or the inner width is unknown.
-fn row_align_x_shift(turtle: &Turtle, walks: &[FinishedWalk]) -> f64 {
-    let align_x = turtle.align().x;
+fn row_align_x_shift(turtle: &Turtle, walks: &[FinishedWalk], rtl: bool) -> f64 {
+    // En una interfaz de derecha a izquierda, `align.x: 0.0` significa «pegado al
+    // principio», y el principio es el borde DERECHO. Se voltea la fracción en
+    // vez de tocar los 28 sitios que deciden posiciones: 0 ↔ 1, y el 0.5 del
+    // centro se queda donde está, que es lo correcto.
+    //
+    // Va aparte de la inversión de la fila a propósito: aquella cambia el ORDEN
+    // de los hijos y esta mueve el BLOQUE al otro borde. Son dos cosas, y
+    // mantenerlas separadas es lo que permite comprobar cada una por su cuenta.
+    let align_x = if rtl && turtle.layout.mirror {
+        1.0 - turtle.align().x
+    } else {
+        turtle.align().x
+    };
     let inner_width = turtle.inner_width();
     if align_x == 0.0 || walks.is_empty() || inner_width.is_nan() {
         return 0.0;
@@ -1342,6 +1395,30 @@ fn row_align_x_shift(turtle: &Turtle, walks: &[FinishedWalk]) -> f64 {
     let spacing = turtle.spacing() * walks.len().saturating_sub(1) as f64;
     let used: f64 = walks.iter().map(|w| w.outer_size.x).sum::<f64>() + spacing;
     align_x * (inner_width - used).max(0.0)
+}
+
+/// Cuánto hay que mover en X cada hijo de una fila para invertir su orden.
+///
+/// Función aparte y pura porque es la única aritmética de todo el espejo, y así
+/// se puede comprobar sin montar un árbol de widgets ni una pantalla.
+///
+/// El reflejo es dentro del **tramo que la fila ocupa**, no dentro de su ancho
+/// disponible: mover el bloque al otro borde es cosa de `align.x`, y mezclar las
+/// dos operaciones haría que ninguna de las dos se pudiera comprobar por su
+/// cuenta.
+fn reflejar_fila(anchos: &[f64], espaciado: f64) -> Vec<f64> {
+    if anchos.len() < 2 {
+        return vec![0.0; anchos.len()];
+    }
+    let ocupado: f64 = anchos.iter().sum::<f64>() + espaciado * (anchos.len() - 1) as f64;
+    let mut desde = 0.0_f64;
+    let mut fuera = Vec::with_capacity(anchos.len());
+    for &ancho in anchos {
+        // Lo que estaba a `desde` del principio queda a `desde + ancho` del final.
+        fuera.push(ocupado - 2.0 * desde - ancho);
+        desde += ancho + espaciado;
+    }
+    fuera
 }
 
 /// The vertical counterpart of [`row_align_x_shift`] for a `Flow::Down` column.
@@ -1486,6 +1563,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             .push(AlignEntry::BeginClip(dvec2(0.0, 0.0), size));
 
         let turtle = Turtle {
+            rtl: self.cx.cx.reading_direction.is_rtl(),
             walk: Walk::fixed(size.x, size.y),
             layout,
             align_start: self.align_list.len() - 1,
@@ -1587,6 +1665,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             .push(AlignEntry::BeginClip(clip_min, clip_max));
 
         let turtle = Turtle {
+            rtl: self.cx.cx.reading_direction.is_rtl(),
             walk,
             layout,
             align_start: self.align_list.len() - 1,
@@ -1628,6 +1707,10 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         let _ = self.finish_row(self.align_list.len());
         self.compute_final_size();
 
+        // Se lee antes del préstamo mutable del turtle: a partir de aquí `self`
+        // está prestado y `self.cx` deja de ser alcanzable.
+        let rtl = self.cx.cx.reading_direction.is_rtl();
+
         let mut turtle = self.turtles.last_mut().unwrap();
         if guard != turtle.guard {
             panic!(
@@ -1658,7 +1741,14 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                             let inner_unused_height =
                                 (inner_effective_height - finished_walk.outer_size.y).max(0.0);
 
-                            let dx = turtle.align().x * inner_unused_width;
+                            // Mismo volteo que en `row_align_x_shift`: en RTL,
+                            // «pegado al inicio» es el borde derecho.
+                            let align_x = if rtl && turtle.layout.mirror {
+                                1.0 - turtle.align().x
+                            } else {
+                                turtle.align().x
+                            };
+                            let dx = align_x * inner_unused_width;
                             let dy = turtle.align().y * inner_unused_height;
 
                             let align_list_start = finished_walk.align_list_start;
@@ -1681,6 +1771,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                     let extra_dx = row_align_x_shift(
                         turtle,
                         &self.finished_walks[turtle_walks_start..],
+                        rtl,
                     );
 
                     for finished_walk_index in turtle_walks_start..self.finished_walks.len() {
@@ -2424,10 +2515,81 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             RowAlign::Center => self.finish_row_center(align_list_start),
         };
 
+        // Espejo de derecha a izquierda. Va DESPUÉS de la alineación vertical y
+        // antes de cerrar la fila, porque solo toca el eje X y las dos son
+        // independientes.
+        //
+        // ⚠ SOLO en `Flow::Right`. `finish_row` se llama para CUALQUIER turtle,
+        // también los de `Flow::Down`, y en una columna los hijos están apilados
+        // en vertical: invertir sus posiciones en X los desparrama por la
+        // pantalla. Se comprobó mirándolo — compilaba, y la pantalla salía
+        // destrozada.
+        let invertir = matches!(self.turtle().flow(), Flow::Right { .. })
+            && self.cx.cx.reading_direction.is_rtl()
+            && self.turtle().layout.mirror;
+        if invertir {
+            self.finish_row_mirror(align_list_start);
+        }
+
         self.turtle_mut().prev_row_metrics = self.turtle().current_row_metrics;
         self.turtle_mut().current_row_metrics = Metrics::default();
         self.finished_rows.push(self.finished_walks.len());
         row_bottom_forgiveness
+    }
+
+    /// Reverses the visual order of the current row's walks for a right-to-left
+    /// interface.
+    ///
+    /// ## Why this is one place and not twenty-eight
+    ///
+    /// The obvious way to support RTL is to teach every site that decides a
+    /// position from `Flow::Right` — there are 28 of them in this file — to know
+    /// about direction. Each one that gets missed is a subtly wrong layout, and
+    /// there is no way to tell whether they are all covered.
+    ///
+    /// Instead, the row is laid out left-to-right exactly as before and then its
+    /// children are reflected within the span they occupy. That is a single
+    /// operation, it is exact, and it is **recursive for free**: a child keeps
+    /// its own internal layout, which its own turtle mirrors in turn when it is
+    /// also a row.
+    ///
+    /// It also mirrors *boxes*, never pixels, so text, images and icons are
+    /// moved but never flipped. Reflecting the coordinate space instead — the
+    /// other tempting shortcut — mirrors the glyphs too, and then needs a
+    /// forever-growing list of things to un-mirror.
+    ///
+    /// ## What it does not do, on purpose
+    ///
+    /// It reverses the order; it does not move the block to the other edge.
+    /// That is `align.x`'s job, handled separately, and keeping the two apart is
+    /// what makes each of them checkable on its own.
+    fn finish_row_mirror(&mut self, align_list_start: usize) {
+        let inicio = self.current_row_walks_start();
+        let fin = self.finished_walks.len();
+        if fin <= inicio + 1 {
+            // Una fila con un solo hijo no cambia al invertirse. Salir aquí evita
+            // recorrer la lista de alineación para nada en el caso más común.
+            return;
+        }
+        let espaciado = self.turtle().spacing();
+        let anchos: Vec<f64> = (inicio..fin)
+            .map(|i| self.finished_walks[i].outer_size.x)
+            .collect();
+        let desplazamientos = reflejar_fila(&anchos, espaciado);
+
+        for (n, i) in (inicio..fin).enumerate() {
+            let dx = desplazamientos[n];
+            if dx == 0.0 {
+                continue;
+            }
+            let start = self.finished_walks[i].align_list_start;
+            let end = if i + 1 < self.finished_walks.len() {
+                self.finished_walks[i + 1].align_list_start
+            } else {
+                align_list_start
+            };
+            self.move_align_list(start, end, dx, 0.0, false);
+        }
     }
 
     /// Baseline-aligns every finished walk in the current row so that its
@@ -3061,3 +3223,105 @@ impl LiveHook for Size {
         }
     }
 }*/
+
+#[cfg(test)]
+mod rtl_tests {
+    use super::*;
+
+    /// Comprueba la propiedad que define el espejo: la posición final de cada
+    /// hijo es la del último, penúltimo… contando desde el otro extremo.
+    fn posiciones(anchos: &[f64], espaciado: f64) -> Vec<f64> {
+        let d = reflejar_fila(anchos, espaciado);
+        let mut x = 0.0;
+        let mut fuera = Vec::new();
+        for (i, &ancho) in anchos.iter().enumerate() {
+            fuera.push(x + d[i]);
+            x += ancho + espaciado;
+        }
+        fuera
+    }
+
+    /// Tres hijos iguales: se invierte el orden y nada se sale del tramo.
+    #[test]
+    fn tres_iguales_se_invierten() {
+        assert_eq!(posiciones(&[10.0, 10.0, 10.0], 0.0), vec![20.0, 10.0, 0.0]);
+    }
+
+    /// Con anchuras DISTINTAS, que es donde una fórmula ingenua falla: no basta
+    /// con invertir el índice, hay que descontar la anchura de cada uno.
+    #[test]
+    fn anchuras_distintas() {
+        // [10 | 30 | 20] ocupa 60. Invertido: 20, 30, 10 → el primero acaba en 50.
+        assert_eq!(posiciones(&[10.0, 30.0, 20.0], 0.0), vec![50.0, 20.0, 0.0]);
+    }
+
+    /// El espaciado se conserva entre los hijos ya invertidos.
+    ///
+    /// ⚠ Este test falló la primera vez y el fallo era MÍO, no del código: puse
+    /// las posiciones esperadas a ojo y me comí el espaciado del tramo total
+    /// (ocupado = 60 de anchuras + 10 de los DOS huecos = 70, no 60). Se deja
+    /// dicho porque la aritmética invita a ese error justo aquí.
+    #[test]
+    fn el_espaciado_se_conserva() {
+        let anchos = [10.0, 20.0, 30.0];
+        let p = posiciones(&anchos, 5.0);
+        assert_eq!(p, vec![60.0, 35.0, 0.0]);
+        // Y la comprobación que no depende de haber acertado los números: los
+        // huecos entre hijos consecutivos siguen midiendo lo mismo.
+        assert_eq!(p[2] + anchos[2] + 5.0, p[1]);
+        assert_eq!(p[1] + anchos[1] + 5.0, p[0]);
+    }
+
+    /// Un hijo solo no se mueve, y cero hijos no revienta.
+    #[test]
+    fn los_casos_degenerados() {
+        assert_eq!(reflejar_fila(&[42.0], 7.0), vec![0.0]);
+        assert!(reflejar_fila(&[], 7.0).is_empty());
+    }
+
+    /// Reflejar dos veces devuelve al principio: la operación es su propia
+    /// inversa, que es la comprobación más fuerte de que no se pierde nada.
+    ///
+    /// ⚠ El primer intento de este test también era mío y estaba mal: reflejaba
+    /// una fila con las ANCHURAS invertidas, que no es lo mismo que reflejar dos
+    /// veces la misma fila. Aquí se aplica la reflexión sobre las posiciones ya
+    /// reflejadas, que es lo que dice el enunciado.
+    #[test]
+    fn reflejar_dos_veces_es_no_hacer_nada() {
+        let anchos = [13.0, 7.0, 21.0, 5.0];
+        let espaciado = 3.0;
+        let ocupado: f64 = anchos.iter().sum::<f64>() + espaciado * 3.0;
+
+        let mut originales = Vec::new();
+        let mut x = 0.0;
+        for &a in &anchos {
+            originales.push(x);
+            x += a + espaciado;
+        }
+        let una = posiciones(&anchos, espaciado);
+        for i in 0..anchos.len() {
+            let dos = ocupado - una[i] - anchos[i];
+            assert_eq!(dos, originales[i], "el hijo {i} no vuelve a su sitio");
+        }
+    }
+
+    /// El padding se intercambia en RTL, y NO se toca con `mirror: false`.
+    #[test]
+    fn el_padding_se_intercambia_solo_si_toca() {
+        let p = Inset { left: 12.0, right: 4.0, top: 1.0, bottom: 2.0 };
+        let hacer = |rtl: bool, mirror: bool| {
+            let mut t = Turtle::default();
+            t.rtl = rtl;
+            t.layout.padding = p;
+            t.layout.mirror = mirror;
+            t.padding()
+        };
+        assert_eq!(hacer(false, true).left, 12.0, "en LTR no cambia nada");
+        assert_eq!(hacer(true, true).left, 4.0, "en RTL se intercambian");
+        assert_eq!(hacer(true, true).right, 12.0);
+        assert_eq!(hacer(true, false).left, 12.0, "mirror:false conserva el físico");
+        // Y el eje vertical nunca se toca: arriba es arriba en todos los idiomas.
+        assert_eq!(hacer(true, true).top, 1.0);
+        assert_eq!(hacer(true, true).bottom, 2.0);
+    }
+}
