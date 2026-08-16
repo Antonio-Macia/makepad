@@ -1,6 +1,38 @@
 /// A software rasterizer that interpolates float varyings and calls a fragment
 /// shader callback per pixel.
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Instrumentación H0-bis (ATLAS): scissor global + contadores de fragmentos
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// POR QUÉ: para decidir si un escritorio por CPU es viable hay que saber cuánto
+// cuesta repintar SÓLO una ventana en vez de la pantalla entera. Makepad no
+// tiene hoy repintado parcial (ni damage ni scissor) en el backend headless, así
+// que se añade aquí el mecanismo mínimo para MEDIRLO: un rectángulo global que
+// recorta la caja envolvente de cada triángulo. No es damage tracking de verdad
+// (no evita recorrer la escena), pero aísla exactamente el coste por píxel, que
+// es la variable que decide.
+//
+// `MAKEPAD_HEADLESS_CLIP=x,y,w,h` en píxeles de dispositivo.
+
+/// Rectángulo de recorte global `(x0, y0, x1, y1)` inclusivo-exclusivo, o `None`.
+pub fn headless_clip_rect() -> Option<(i32, i32, i32, i32)> {
+    static CLIP: std::sync::OnceLock<Option<(i32, i32, i32, i32)>> = std::sync::OnceLock::new();
+    *CLIP.get_or_init(|| {
+        let raw = std::env::var("MAKEPAD_HEADLESS_CLIP").ok()?;
+        let parts: Vec<i32> = raw.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        if parts.len() != 4 {
+            return None;
+        }
+        Some((parts[0], parts[1], parts[0] + parts[2], parts[1] + parts[3]))
+    })
+}
+
+/// Píxeles visitados dentro de la caja envolvente (candidatos a fragmento).
+pub static FRAG_TESTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Invocaciones REALES del shader de fragmento (pasaron cobertura y z-test).
+pub static FRAG_SHADED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub struct Framebuffer {
     pub width: usize,
     pub height: usize,
@@ -22,6 +54,30 @@ impl Framebuffer {
     pub fn clear(&mut self, color: [f32; 4], depth: f32) {
         self.color.fill(color);
         self.depth.fill(depth);
+    }
+
+    /// Limpia sólo un rectángulo del framebuffer (repintado parcial simulado).
+    pub fn clear_rect(
+        &mut self,
+        color: [f32; 4],
+        depth: f32,
+        x0: i32,
+        y0: i32,
+        x1: i32,
+        y1: i32,
+    ) {
+        let x0 = x0.max(0) as usize;
+        let y0 = y0.max(0) as usize;
+        let x1 = (x1.max(0) as usize).min(self.width);
+        let y1 = (y1.max(0) as usize).min(self.height);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        for y in y0..y1 {
+            let base = y * self.width;
+            self.color[base + x0..base + x1].fill(color);
+            self.depth[base + x0..base + x1].fill(depth);
+        }
     }
 
     pub fn to_rgba8(&self) -> Vec<u8> {
@@ -177,14 +233,27 @@ pub fn rasterize_triangle_rows<F>(
         area = -area;
     }
 
-    let min_x = sx[0].min(sx[1]).min(sx[2]).floor().max(0.0) as i32;
-    let min_y = sy[0].min(sy[1]).min(sy[2]).floor().max(row_start as f32) as i32;
-    let max_x = sx[0].max(sx[1]).max(sx[2]).ceil().min(w - 1.0) as i32;
-    let max_y = sy[0].max(sy[1]).max(sy[2]).ceil().min(row_end as f32 - 1.0) as i32;
+    let mut min_x = sx[0].min(sx[1]).min(sx[2]).floor().max(0.0) as i32;
+    let mut min_y = sy[0].min(sy[1]).min(sy[2]).floor().max(row_start as f32) as i32;
+    let mut max_x = sx[0].max(sx[1]).max(sx[2]).ceil().min(w - 1.0) as i32;
+    let mut max_y = sy[0].max(sy[1]).max(sy[2]).ceil().min(row_end as f32 - 1.0) as i32;
+
+    // Scissor global (instrumentación H0-bis): recorta la caja envolvente al
+    // rectángulo de damage simulado. Todo lo de fuera ni siquiera se visita.
+    if let Some((cx0, cy0, cx1, cy1)) = headless_clip_rect() {
+        min_x = min_x.max(cx0);
+        min_y = min_y.max(cy0);
+        max_x = max_x.min(cx1 - 1);
+        max_y = max_y.min(cy1 - 1);
+    }
 
     if max_x < min_x || max_y < min_y {
         return;
     }
+    FRAG_TESTED.fetch_add(
+        ((max_x - min_x + 1) as u64) * ((max_y - min_y + 1) as u64),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 
     let vary_len = vary_src[0].len();
     let flat_slots = flat_slots.min(vary_len);
@@ -220,6 +289,9 @@ pub fn rasterize_triangle_rows<F>(
         true
     };
 
+    // Contador local (no atómico por píxel: el fetch_add por fragmento falsearía
+    // la medida). Se vuelca una sola vez al terminar el triángulo.
+    let mut shaded_here: u64 = 0;
     for y in min_y..=max_y {
         for x in min_x..=max_x {
             let px = x as f32 + 0.5;
@@ -262,6 +334,7 @@ pub fn rasterize_triangle_rows<F>(
                 scratch.interp[i] = vary_src[0][i];
             }
 
+            shaded_here += 1;
             let frag_color = if compute_derivatives {
                 // Build dFdx/dFdy-style deltas by evaluating at neighboring pixel centers.
                 // GPU derivatives are pairwise across a 2x2 quad:
@@ -328,6 +401,7 @@ pub fn rasterize_triangle_rows<F>(
             }
         }
     }
+    FRAG_SHADED.fetch_add(shaded_here, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[inline]
