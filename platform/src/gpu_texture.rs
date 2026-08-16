@@ -41,7 +41,7 @@ use crate::{
 
 #[cfg(any(
     target_os = "windows",
-    all(target_os = "linux", not(any(target_env = "ohos", linux_direct))),
+    all(target_os = "linux", not(any(target_env = "ohos", linux_direct, headless))),
     target_os = "macos",
     target_os = "ios",
 ))]
@@ -1127,7 +1127,7 @@ pub use android_api::{
 /// Linux desktop (X11 / Wayland) GL texture adopt hooks for app-owned video /
 /// camera / effect surfaces. Same ownership rules as the module docs: borrowed
 /// by default (`gl_texture_owned = false`).
-#[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct))))]
+#[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct, headless))))]
 mod linux_api {
     use super::*;
     use crate::os::gl_sys::LibGl;
@@ -1354,7 +1354,7 @@ mod linux_api {
     }
 }
 
-#[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct))))]
+#[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct, headless))))]
 pub use crate::os::linux::linux_video_gpu::{
     present_dmabuf_nv12, present_gl_memory_rgba, LinuxDmabufNv12Frame, LinuxDmabufPlane,
     LinuxDmabufPresentCache, LinuxGlMemoryPresentCache, LinuxGlMemoryRgbaFrame,
