@@ -2147,6 +2147,31 @@ impl DrawText {
         })
     }
 
+    /// La alineación horizontal del texto, volteada si la interfaz se lee de
+    /// derecha a izquierda.
+    ///
+    /// Sin esto, un `Label` a `width: Fill` deja el árabe pegado al borde
+    /// IZQUIERDO aunque las palabras estén perfectamente compuestas: el párrafo
+    /// se lee bien y la pantalla se lee mal. Es la mitad del RTL que no se ve
+    /// hasta que el texto tiene sitio de sobra.
+    ///
+    /// Se voltea la fracción (0 ↔ 1), igual que hace el turtle con `align.x`; el
+    /// 0.5 del centro se queda donde está. Respeta `Layout::mirror`, así que un
+    /// bloque marcado para no voltearse —código, una hora, un logotipo—
+    /// conserva su alineación física.
+    ///
+    /// ⚠ Hay DOS rutas de dibujado de texto y las dos la necesitan: la que
+    /// recibe el `align` por parámetro (la de un `Label`) y la que lo toma de
+    /// `self.layout_align`. Arreglar solo una deja el fallo vivo en la mitad de
+    /// los casos, y fue exactamente lo que pasó al primer intento.
+    fn align_leido(cx: &Cx2d, align: Align) -> Align {
+        if cx.cx.reading_direction.is_rtl() && cx.turtle().layout().mirror {
+            Align { x: 1.0 - align.x, ..align }
+        } else {
+            align
+        }
+    }
+
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk, align: Align, text: &str) -> Rect {
         let mut max_width_in_lpxs = self.max_layout_width_for_walk(cx, walk);
 
@@ -2208,6 +2233,8 @@ impl DrawText {
 
         let wrap = matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
 
+
+        let align = Self::align_leido(cx, align);
         let text = self.layout(cx, 0.0, 0.0, max_width_in_lpxs, wrap, align, text);
         self.draw_walk_laidout(cx, walk, &text)
     }
@@ -2319,6 +2346,18 @@ impl DrawText {
             None
         };
         let wrap = matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
+        // Se calcula ANTES de prestar `cx` a `self.layout(...)`.
+        //
+        // En una interfaz de derecha a izquierda, un texto alineado «al inicio»
+        // empieza por la DERECHA. Sin esto, un `Label` a `width: Fill` deja el
+        // árabe pegado al borde izquierdo aunque las palabras estén bien
+        // compuestas: el párrafo se lee bien y la pantalla se lee mal.
+        //
+        // Se voltea la fracción (0 ↔ 1) igual que hace el turtle con `align.x`,
+        // y el 0.5 del centro se queda donde está. Respeta `Layout::mirror`, así
+        // que un bloque marcado para no voltearse —código, una hora, un
+        // logotipo— conserva su alineación física.
+        let align_texto = Self::align_leido(cx, self.layout_align);
 
         // ── Text layout ──
         let text = self.layout(
@@ -2327,7 +2366,7 @@ impl DrawText {
             row_height as f32,
             max_width_in_lpxs,
             wrap,
-            self.layout_align,
+            align_texto,
             text_str,
         );
 
