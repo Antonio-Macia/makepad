@@ -37,6 +37,55 @@ pub fn set_clip_suspended(suspended: bool) {
     CLIP_SUSPENDED.store(suspended, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Daño calculado del frame en curso, empaquetado en cuatro `i32` atómicos.
+///
+/// Va en estáticos y no en el `Cx` porque lo lee el **rasterizador por
+/// triángulo**, que corre en el pool de hilos de render y no tiene acceso al `Cx`.
+/// `x1 <= x0` significa «sin daño declarado» → pantalla entera.
+static DANO: [std::sync::atomic::AtomicI32; 4] = [
+    std::sync::atomic::AtomicI32::new(0),
+    std::sync::atomic::AtomicI32::new(0),
+    std::sync::atomic::AtomicI32::new(0),
+    std::sync::atomic::AtomicI32::new(0),
+];
+
+/// Fija el daño calculado del frame. `None` = repintar entero.
+pub fn set_damage_rect(rect: Option<(i32, i32, i32, i32)>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    match rect {
+        Some((x0, y0, x1, y1)) => {
+            DANO[0].store(x0, Relaxed);
+            DANO[1].store(y0, Relaxed);
+            DANO[2].store(x1, Relaxed);
+            DANO[3].store(y1, Relaxed);
+        }
+        // Se pone x1 = x0 para que `daño_calculado` lo lea como ausente. NO se usa
+        // un rectángulo de área cero en el origen: eso significaría «no repintes
+        // nada», que es lo contrario de lo que quiere decir «no lo sé».
+        None => {
+            DANO[0].store(0, Relaxed);
+            DANO[2].store(0, Relaxed);
+            DANO[1].store(0, Relaxed);
+            DANO[3].store(0, Relaxed);
+        }
+    }
+}
+
+/// Daño calculado, o `None` si no hay.
+fn daño_calculado() -> Option<(i32, i32, i32, i32)> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (x0, y0, x1, y1) = (
+        DANO[0].load(Relaxed),
+        DANO[1].load(Relaxed),
+        DANO[2].load(Relaxed),
+        DANO[3].load(Relaxed),
+    );
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some((x0, y0, x1, y1))
+}
+
 /// Rectángulo de recorte global `(x0, y0, x1, y1)` inclusivo-exclusivo, o `None`.
 ///
 /// Devuelve `None` —o sea, «pinta entero»— mientras el recorte esté suspendido
@@ -44,6 +93,11 @@ pub fn set_clip_suspended(suspended: bool) {
 pub fn headless_clip_rect() -> Option<(i32, i32, i32, i32)> {
     if CLIP_SUSPENDED.load(std::sync::atomic::Ordering::Relaxed) {
         return None;
+    }
+    // El daño CALCULADO manda sobre la variable de entorno, que se queda como lo
+    // que siempre fue: un instrumento para medir un rectángulo fijo.
+    if let Some(r) = daño_calculado() {
+        return Some(r);
     }
     static CLIP: std::sync::OnceLock<Option<(i32, i32, i32, i32)>> = std::sync::OnceLock::new();
     *CLIP.get_or_init(|| {
