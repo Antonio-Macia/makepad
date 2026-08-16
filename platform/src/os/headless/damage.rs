@@ -54,6 +54,28 @@
 //! restos de una ventana que ya no está, y sólo aparece al mover cosas — nunca en
 //! una captura estática, que es justo lo que suele mirarse.
 //!
+//! # 🔴 Un defecto PRE-EXISTENTE que este oráculo destapa, y no es del daño
+//!
+//! El backend por software pinta **la primera fila de texto más apagada en el
+//! frame 0** que en todos los siguientes: 1.109 px, diferencia de hasta 77 por
+//! canal, misma posición de glifos y distinta intensidad. Con repintado completo
+//! se autocorrige en el frame 1 y no lo nota nadie; con daño **se congela**,
+//! porque nadie vuelve a tocar esa zona.
+//!
+//! Acotado el 2026-08-16, y lo que ya está DESCARTADO (para no repetir el rato):
+//!
+//! - **No lo introdujo el framebuffer persistente ni el daño.** Reproducido
+//!   contra el código anterior a los dos.
+//! - **No es la caché de conversión de texturas.** Probado desactivando el atajo
+//!   `already_converted_this_frame`: la diferencia sigue igual.
+//! - **No es que el atlas de glifos crezca** al aparecer caracteres nuevos.
+//!   Probado poniendo el contador al MISMO tamaño de fuente y con el MISMO juego
+//!   de caracteres que la rejilla, de forma que el frame 1 no añade ni un glifo:
+//!   la diferencia sigue igual.
+//!
+//! Sin diagnosticar más allá de eso. El oráculo lo trata explícitamente: mide la
+//! referencia contra sí misma, excluye esa zona y lo imprime.
+//!
 //! # Cómo se comprueba que no miente
 //!
 //! Con un oráculo que no sale de aquí: `MAKEPAD_HEADLESS_DAMAGE=0` desactiva el
