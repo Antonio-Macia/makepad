@@ -1811,9 +1811,18 @@ pub fn can_play_type(mime: &str) -> &'static str {
     can_play_type_impl(mime)
 }
 
-#[cfg(all(target_os = "linux", not(target_os = "android")))]
+// Reproducción de vídeo: en Linux la implementa `os::linux`, que NO se compila
+// bajo el backend `headless` (ver os/mod.rs). Sin GPU ni ventana no hay
+// reproductor, así que headless cae en el stub `""` de más abajo.
+#[cfg(all(target_os = "linux", not(target_os = "android"), not(headless)))]
 fn can_play_type_impl(mime: &str) -> &'static str {
     crate::os::linux::linux_video_playback::can_play_type(mime)
+}
+
+/// Stub para linux+headless: no hay backend multimedia, no se puede reproducir nada.
+#[cfg(all(target_os = "linux", not(target_os = "android"), headless))]
+fn can_play_type_impl(_mime: &str) -> &'static str {
+    ""
 }
 
 #[cfg(target_os = "android")]

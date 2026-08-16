@@ -159,12 +159,46 @@ fn dylib_extension() -> &'static str {
     "bin"
 }
 
-#[cfg(target_os = "macos")]
+// ─────────────────────────────────────────────────────────────────────────────
+// Carga dinámica del .so/.dylib de shader compilado en runtime
+//
+// POR QUÉ EXISTE ESTA CAPA (en español, por norma del proyecto):
+//
+// El backend `headless` no tiene GPU: traduce cada shader de Makepad (MPSL) a
+// código Rust (`ShaderBackend::Rust`), lo compila invocando `rustc` como proceso
+// hijo (ver `compile_and_load` arriba) y necesita después *ejecutar* ese código
+// desde el proceso que ya está corriendo. La única forma de hacerlo sin
+// reiniciar es cargar la biblioteca compartida resultante en el espacio de
+// direcciones actual y resolver por nombre los símbolos que el generador emite
+// (`makepad_headless_shader_version`, funciones de vértice/fragmento). Eso es
+// exactamente lo que hace `dlopen`/`dlsym`: es el "linker en caliente" que
+// sustituye al driver de GPU (que normalmente compilaría el shader él mismo).
+//
+// Originalmente sólo estaba implementado para macOS. Esta rama es común a todo
+// UNIX (macOS y Linux/glibc comparten la misma API POSIX de `<dlfcn.h>` y el
+// mismo valor de `RTLD_NOW`), así que el `cfg` se amplía a `unix` en lugar de
+// duplicar el bloque. En glibc >= 2.34 los símbolos `dl*` viven ya dentro de
+// `libc.so`, por lo que la declaración `extern "C"` de abajo resuelve en el
+// enlazado sin necesidad de pedir `-ldl` explícitamente.
+//
+// Notas de seguridad (todo esto es `unsafe` por naturaleza):
+//   - El módulo se mantiene vivo mientras exista el `HeadlessLoadedModule`; los
+//     punteros a función obtenidos con `symbol()` NO deben sobrevivir al `Drop`,
+//     porque `dlclose` puede desmapear el código.
+//   - `RTLD_NOW` (=2 en ambos sistemas) fuerza a resolver todas las relocaciones
+//     al cargar: preferimos fallar aquí, con un error legible, antes que morir
+//     con un SIGSEGV en mitad del rasterizado del primer frame.
+//   - `dlerror()` no es reentrante ni thread-safe; sólo se llama en el camino de
+//     error, inmediatamente después de la llamada que falló.
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(unix)]
 pub struct HeadlessLoadedModule {
+    /// Handle opaco devuelto por `dlopen`. `NonNull` porque un handle nulo es
+    /// justo la señal de error de la API POSIX.
     handle: std::ptr::NonNull<c_void>,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 impl HeadlessLoadedModule {
     pub fn load(path: &Path) -> Result<Self, String> {
         const RTLD_NOW: i32 = 2;
@@ -194,7 +228,7 @@ impl HeadlessLoadedModule {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 impl Drop for HeadlessLoadedModule {
     fn drop(&mut self) {
         unsafe {
@@ -203,7 +237,10 @@ impl Drop for HeadlessLoadedModule {
     }
 }
 
-#[cfg(target_os = "macos")]
+/// Recupera el último mensaje de error de `dlopen`/`dlsym` como `String`.
+/// Devuelve un texto genérico si `dlerror()` da NULL (puede pasar si otra
+/// llamada consumió el error antes).
+#[cfg(unix)]
 fn last_dlerror() -> String {
     let err = unsafe { dlerror() };
     if err.is_null() {
@@ -214,7 +251,11 @@ fn last_dlerror() -> String {
         .into_owned()
 }
 
-#[cfg(target_os = "macos")]
+// Declaración manual de la API POSIX de carga dinámica. Se declara a mano (en
+// lugar de depender del crate `libc`) para no añadir dependencias a
+// `makepad-platform`, siguiendo el mismo estilo que el binding manual de libc
+// que ya usa el backend `os/linux/libc_sys.rs`.
+#[cfg(unix)]
 unsafe extern "C" {
     fn dlopen(path: *const std::os::raw::c_char, mode: i32) -> *mut c_void;
     fn dlsym(handle: *mut c_void, symbol: *const std::os::raw::c_char) -> *mut c_void;
@@ -222,19 +263,24 @@ unsafe extern "C" {
     fn dlerror() -> *const std::os::raw::c_char;
 }
 
-#[cfg(not(target_os = "macos"))]
+// Fallback para plataformas sin `dlfcn.h` (Windows, wasm, y en su día ATLAS):
+// el JIT de shaders no puede funcionar ahí y se reporta como error explícito en
+// vez de fallar de forma silenciosa. En ATLAS la salida prevista NO es
+// implementar esto, sino precompilar los shaders AOT (ver H1 del documento
+// BRASA-BARE-METAL-CAMINO.md).
+#[cfg(not(unix))]
 pub struct HeadlessLoadedModule;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(unix))]
 impl HeadlessLoadedModule {
     pub fn load(path: &Path) -> Result<Self, String> {
         Err(format!(
-            "headless shader dlopen is only implemented on macOS for now (`{}`)",
+            "headless shader dlopen is only implemented on unix for now (`{}`)",
             path.display()
         ))
     }
 
     pub fn shader_version(&self) -> Result<u32, String> {
-        Err("headless shader version lookup is only implemented on macOS for now".to_string())
+        Err("headless shader version lookup is only implemented on unix for now".to_string())
     }
 }
