@@ -1,4 +1,5 @@
 mod aot;
+pub mod damage;
 mod event_loop;
 mod jit;
 mod raster;
@@ -92,6 +93,8 @@ pub struct CxOs {
     /// recorte: fuera del daño no hay nada anterior que conservar, y tratar ese
     /// caso como los demás dejaría basura sin pintar en la primera pantalla.
     pub(crate) framebuffers: Vec<Option<crate::os::headless::virtual_gpu::Framebuffer>>,
+    /// Cálculo del daño por frame. Ver `damage.rs`.
+    pub(crate) damage: crate::os::headless::damage::DamageTracker,
 }
 
 impl Default for CxOs {
@@ -108,6 +111,7 @@ impl Default for CxOs {
             render_pool_threads: 0,
             texture_conversions: Default::default(),
             framebuffers: Vec::new(),
+            damage: Default::default(),
         }
     }
 }
