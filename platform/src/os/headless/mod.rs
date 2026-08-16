@@ -75,6 +75,23 @@ pub struct CxOs {
     /// draw, which cost more than rasterising the window did. Entries carry a
     /// signature and are redone when the texture reports pending updates.
     pub(crate) texture_conversions: crate::os::headless::raster::TextureConversionCache,
+    /// Framebuffers de ventana que VIVEN ENTRE FRAMES, indexados por `window_id`.
+    ///
+    /// # Por qué existe
+    ///
+    /// El recorte por daño (`headless_clip_rect`) limpiaba y rasterizaba sólo el
+    /// rectángulo sucio… sobre un `Framebuffer::new()` recién reservado. O sea que
+    /// el ahorro era **la mitad del ahorro**: no se repintaba fuera del daño, pero
+    /// tampoco quedaba nada ahí — el resto de la pantalla salía en negro
+    /// transparente. Un repintado parcial de verdad necesita que lo de fuera del
+    /// daño **siga estando** del frame anterior; eso es lo que hace un compositor,
+    /// y es lo que hace esto.
+    ///
+    /// Se reutiliza sólo si el tamaño coincide. Al primer frame y tras cada
+    /// redimensión el framebuffer es nuevo y se limpia **entero**, ignorando el
+    /// recorte: fuera del daño no hay nada anterior que conservar, y tratar ese
+    /// caso como los demás dejaría basura sin pintar en la primera pantalla.
+    pub(crate) framebuffers: Vec<Option<crate::os::headless::virtual_gpu::Framebuffer>>,
 }
 
 impl Default for CxOs {
@@ -90,6 +107,7 @@ impl Default for CxOs {
             render_pool: None,
             render_pool_threads: 0,
             texture_conversions: Default::default(),
+            framebuffers: Vec::new(),
         }
     }
 }
