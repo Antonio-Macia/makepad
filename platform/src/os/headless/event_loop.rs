@@ -230,6 +230,51 @@ impl Cx {
             self.os.no_draw_initialized = true;
             return false;
         }
+
+        // ── Frame de CALENTAMIENTO ────────────────────────────────────────────
+        //
+        // 🔴 El primer frame pinta el texto DISTINTO a todos los demás.
+        //
+        // Medido el 2026-08-17 en una escena completamente estática: el frame 0
+        // difiere de los siguientes en **3.097 px**, y del frame 1 en adelante son
+        // idénticos entre sí. O sea que no depende de lo que cambie: es un
+        // asentamiento de una sola vez.
+        //
+        // La causa está en `draw/src/text/fonts.rs`: el rasterizado de glifos es
+        // **asíncrono** (`dispatch_msdf_jobs` / `apply_completed_msdf_jobs`) y el
+        // atlas se sube a la textura por rectángulo sucio. El primer frame se
+        // pinta con el atlas a medio asentar; el segundo ya lo tiene entero.
+        //
+        // Por qué hay que arreglarlo aquí y no ignorarlo:
+        //
+        // 1. **Toda captura de UN solo frame recoge el texto sin asentar.** Es el
+        //    caso de cualquier screenshot de referencia — y una referencia mala no
+        //    da error, da diferencias falsas en todo lo que se compare con ella.
+        // 2. **Con repintado por daño, se congela.** Lo de fuera del daño no se
+        //    vuelve a tocar, así que esa zona se queda con la versión del frame 0
+        //    para siempre.
+        //
+        // Se corrige donde nace: se hace un ciclo completo de dibujo+render que
+        // NO se presenta, y a partir de ahí todo lo emitido está asentado. Cuesta
+        // un frame al arrancar, que es exactamente lo que costaba antes en forma
+        // de frame incorrecto.
+        //
+        // ⚠ Para medir el coste del PRIMER frame en frío (cachés vacías) hay que
+        // apagarlo con `MAKEPAD_HEADLESS_NO_WARMUP=1`; si no, el calentamiento se
+        // lleva ese coste y las cifras del arranque salen falsamente buenas.
+        if !self.os.warmup_done {
+            self.os.warmup_done = true;
+            if std::env::var("MAKEPAD_HEADLESS_NO_WARMUP").is_err() {
+                self.call_draw_event(time_now);
+                self.headless_compile_shaders();
+                self.headless_render_all_passes(time_now);
+                // El calentamiento repinta entero por construcción (el
+                // framebuffer nace en él), así que el frame siguiente sí tiene
+                // algo anterior que conservar y el daño ya significa lo que dice.
+                self.redraw_all();
+            }
+        }
+
         // Instrumentación H0-bis: `call_draw_event` es TODA la parte de UI que no
         // es rasterizado (recorrido del árbol de widgets, layout, shaping de
         // texto, construcción de draw-lists). Va aparte porque el repintado
