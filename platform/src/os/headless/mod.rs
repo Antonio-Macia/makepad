@@ -95,6 +95,12 @@ pub struct CxOs {
     pub(crate) framebuffers: Vec<Option<crate::os::headless::virtual_gpu::Framebuffer>>,
     /// Cálculo del daño por frame. Ver `damage.rs`.
     pub(crate) damage: crate::os::headless::damage::DamageTracker,
+    /// ¿Se ha hecho ya el frame de calentamiento? Ver `headless_process_draw_cycle`.
+    ///
+    /// El rasterizado de glifos es asíncrono, así que el PRIMER frame pinta el
+    /// texto distinto a todos los demás. Se descarta un ciclo completo antes de
+    /// presentar nada.
+    pub(crate) warmup_done: bool,
 }
 
 impl Default for CxOs {
@@ -112,6 +118,7 @@ impl Default for CxOs {
             texture_conversions: Default::default(),
             framebuffers: Vec::new(),
             damage: Default::default(),
+            warmup_done: false,
         }
     }
 }

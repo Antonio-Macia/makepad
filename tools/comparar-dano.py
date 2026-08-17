@@ -46,16 +46,17 @@ def main():
     # ── Paso 1: ¿es la REFERENCIA estable consigo misma? ─────────────────────
     #
     # No se le puede exigir al daño una estabilidad que la propia vara de medir
-    # no tiene. Y aquí no es hipotético: el backend por software pinta la
-    # primera fila de texto más APAGADA en el frame 0 que en todos los
-    # siguientes. Es un defecto PRE-EXISTENTE — confirmado el 2026-08-16 contra
-    # el código anterior a la persistencia y al cálculo de daño. Con repintado
-    # completo se autocorrige en el frame 1 y nadie lo nota; con daño, esa zona
-    # se congela porque nadie la vuelve a tocar.
+    # no tiene. Se mide la referencia contra sí misma (frame 0 vs frame 1), se
+    # saca la máscara de lo que ella no reproduce, y se excluye. Y se IMPRIME
+    # siempre: una exclusión callada es cómo un oráculo se convierte en una
+    # casilla.
     #
-    # Se mide la referencia contra sí misma, se saca la máscara de lo que ella
-    # no reproduce, y se excluye. Y se IMPRIME siempre: una exclusión callada es
-    # cómo un oráculo se convierte en una casilla.
+    # Esta máscara ya NO recoge el defecto del frame 0 (texto sin asentar por el
+    # rasterizado asíncrono de glifos): se arregló el 2026-08-17 con un frame de
+    # calentamiento, y bajó de 1.109 px a 0. Lo que queda ahora es sólo el
+    # CONTENIDO de la escena que cambia legítimamente entre esos dos frames — en
+    # el banco, el contador. Si esta cifra vuelve a crecer y a caer sobre zonas
+    # que deberían estar quietas, hay otro asentamiento que investigar.
     r0, r1 = abrir(ref[0]), abrir(ref[1])
     inestable = (
         ImageChops.difference(r0, r1).convert("L").point(lambda v: 255 if v else 0)
@@ -65,10 +66,12 @@ def main():
 
     if zona:
         x0, y0, x1, y1 = zona
-        print(f"⚠  la REFERENCIA no se reproduce a sí misma en {px_inestables} px, "
-              f"en ({x0},{y0})-({x1},{y1}).")
-        print("   Es el defecto pre-existente del frame 0 (texto más apagado).")
-        print("   Esa zona se EXCLUYE: el daño no puede responder de ella.")
+        print(f"⚠  la referencia cambia entre su frame 0 y su frame 1 en "
+              f"{px_inestables} px, en ({x0},{y0})-({x1},{y1}).")
+        print("   Se EXCLUYE esa zona: el daño no puede responder de lo que la")
+        print("   propia referencia no reproduce. Con el frame de calentamiento")
+        print("   puesto, aquí debería quedar sólo el contenido que cambia de")
+        print("   verdad; si aparece sobre zonas quietas, hay otro asentamiento.")
 
     # ── Paso 2: comparar, desde el frame 1 y fuera de la zona inestable ──────
     #
