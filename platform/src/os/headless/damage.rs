@@ -54,27 +54,31 @@
 //! restos de una ventana que ya no está, y sólo aparece al mover cosas — nunca en
 //! una captura estática, que es justo lo que suele mirarse.
 //!
-//! # 🔴 Un defecto PRE-EXISTENTE que este oráculo destapa, y no es del daño
+//! # ✅ Un defecto PRE-EXISTENTE que este oráculo destapó, y que ya está ARREGLADO
 //!
-//! El backend por software pinta **la primera fila de texto más apagada en el
-//! frame 0** que en todos los siguientes: 1.109 px, diferencia de hasta 77 por
-//! canal, misma posición de glifos y distinta intensidad. Con repintado completo
-//! se autocorrige en el frame 1 y no lo nota nadie; con daño **se congela**,
-//! porque nadie vuelve a tocar esa zona.
+//! El backend por software pintaba **la primera fila de texto más apagada en el
+//! frame 0** que en todos los siguientes: 1.109 px, hasta 77 por canal.
 //!
-//! Acotado el 2026-08-16, y lo que ya está DESCARTADO (para no repetir el rato):
+//! **La causa:** el rasterizado de glifos es asíncrono
+//! (`draw/src/text/fonts.rs`, `dispatch_msdf_jobs` / `apply_completed_msdf_jobs`)
+//! y el atlas se sube a la textura por rectángulo sucio. El primer frame se
+//! pintaba con el atlas a medio asentar.
 //!
-//! - **No lo introdujo el framebuffer persistente ni el daño.** Reproducido
-//!   contra el código anterior a los dos.
-//! - **No es la caché de conversión de texturas.** Probado desactivando el atajo
-//!   `already_converted_this_frame`: la diferencia sigue igual.
-//! - **No es que el atlas de glifos crezca** al aparecer caracteres nuevos.
-//!   Probado poniendo el contador al MISMO tamaño de fuente y con el MISMO juego
-//!   de caracteres que la rejilla, de forma que el frame 1 no añade ni un glifo:
-//!   la diferencia sigue igual.
+//! **Por qué había que arreglarlo y no ignorarlo**, aunque con repintado completo
+//! se autocorrigiera en el frame 1: toda **captura de UN solo frame** recogía el
+//! texto sin asentar. O sea que cualquier screenshot de referencia nacía mal, y
+//! una referencia mala no da error — da diferencias falsas en todo lo que se
+//! compare con ella. Y con daño se congelaba, porque nadie vuelve a tocar esa
+//! zona.
 //!
-//! Sin diagnosticar más allá de eso. El oráculo lo trata explícitamente: mide la
-//! referencia contra sí misma, excluye esa zona y lo imprime.
+//! **El arreglo:** un ciclo completo de dibujo+render que no se presenta, antes
+//! del primer frame (`os/headless/event_loop.rs`, `warmup_done`). Verificado: la
+//! diferencia entre el frame 0 y los siguientes en una escena estática pasa de
+//! 1.109 px a **0**.
+//!
+//! Lo que quedó descartado por el camino, para no repetir el rato: no fue la
+//! caché de conversión de texturas, ni el crecimiento del atlas por caracteres
+//! nuevos, ni el framebuffer persistente, ni el propio daño.
 //!
 //! # Cómo se comprueba que no miente
 //!
