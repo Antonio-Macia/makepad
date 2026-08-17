@@ -533,6 +533,28 @@ fn glyph_key(
     hasher.finish()
 }
 
+/// Sonda: **saltarse del todo** las dos pasadas de grabación
+/// (`MAKEPAD_HEADLESS_RECORD_NOOP`).
+///
+/// ⚠ **NO es una optimización: rompe las derivadas** (los quad buffers se quedan
+/// sin escribir, así que `dFdx`/`dFdy` devuelven basura del píxel anterior). Es
+/// una **sonda de diagnóstico**, hermana de `MAKEPAD_HEADLESS_NO_DERIV`, y sirve
+/// para separar dos cosas que esa otra mezcla:
+///
+/// - `NO_DERIV` apaga el camino entero, así que ahorra **el shader Y el
+///   andamiaje del host** (rellenar `dx_varyings`/`dy_varyings` sobre todos los
+///   slots y tres `write_varyings` por píxel).
+/// - Ésta ahorra **sólo las dos ejecuciones del shader**, dejando intacto todo
+///   el trabajo del host.
+///
+/// La diferencia entre las dos dice dónde está el coste de verdad, que es
+/// justamente lo que hacía falta saber para decidir si merece la pena recortar
+/// el shader o hay que atacar el host.
+fn record_noop() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("MAKEPAD_HEADLESS_RECORD_NOOP").is_ok())
+}
+
 /// ¿Está encendido el memo de glifos? (`MAKEPAD_HEADLESS_GLYPH_MEMO`)
 ///
 /// Apagado por defecto: hoy no acierta (ver `GlyphTile`) y encenderlo sólo añade
@@ -585,6 +607,8 @@ fn rasterize_instances_rows(
         Vec::new()
     };
     let shift_start = flat_slots.min(varying_slots);
+    // Sonda de diagnóstico: ver `record_noop`. Rompe las derivadas a propósito.
+    let saltar_grabacion = record_noop();
     let tri_count = indices.len() / 3;
     let vary_bytes = varying_slots * std::mem::size_of::<f32>();
     let mut debug_text_prints = 0usize;
@@ -735,8 +759,10 @@ fn rasterize_instances_rows(
                     );
                     set_u32(&mut rcx_buf, rcx_quad_mode_offset, 0);
                     set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0);
-                    unsafe {
-                        fragment_fn(rcx_buf.as_mut_ptr() as *mut f32, rcx_f32s as u32);
+                    if !saltar_grabacion {
+                        unsafe {
+                            fragment_fn(rcx_buf.as_mut_ptr() as *mut f32, rcx_f32s as u32);
+                        }
                     }
 
                     write_varyings(
@@ -748,8 +774,10 @@ fn rasterize_instances_rows(
                     );
                     set_u32(&mut rcx_buf, rcx_quad_mode_offset, 1);
                     set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0);
-                    unsafe {
-                        fragment_fn(rcx_buf.as_mut_ptr() as *mut f32, rcx_f32s as u32);
+                    if !saltar_grabacion {
+                        unsafe {
+                            fragment_fn(rcx_buf.as_mut_ptr() as *mut f32, rcx_f32s as u32);
+                        }
                     }
 
                     write_varyings(
