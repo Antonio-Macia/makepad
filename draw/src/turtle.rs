@@ -2689,10 +2689,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             } else {
                 align_list_start
             };
-            // `shift_clip: true` — ver el porqué en `mirror_deferred_row`: reflejar
-            // MUEVE el contenedor de sitio, así que su recorte tiene que viajar con
-            // él o corta a su propio contenido.
-            self.move_align_list(start, end, dx, 0.0, true);
+            self.move_align_list(start, end, dx, 0.0, false);
         }
     }
 
@@ -2765,24 +2762,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             let i = turtle_walks_start + relativo;
             let start = self.finished_walks[i].align_list_start;
             let end = self.finished_walk_align_list_end(i);
-            // ⚠ `shift_clip: true`, y es media corrección del RTL.
-            //
-            // Casi todos los llamantes de `move_align_list` pasan `false`, y para
-            // ellos es correcto: alinean contenido DENTRO de un contenedor que no se
-            // mueve, así que el rectángulo de recorte sigue valiendo. El espejo hace
-            // lo contrario — coge el contenedor y lo lleva al otro lado de la fila—,
-            // así que es el mismo caso que `shift_align_range`, el único sitio que ya
-            // pasaba `true`.
-            //
-            // Con `false`, las instancias de dibujo se movían y **su recorte se
-            // quedaba en la posición vieja**. Se ve como que un `Button` a
-            // `width: Fill` sale SIN TEXTO en árabe: el rótulo se dibuja 292 px más
-            // allá y el clip antiguo lo rebana, dejando a lo sumo un fragmento de
-            // letra. El fondo del botón se pinta bien —va en el turtle padre, fuera
-            // de ese clip— y por eso la caja aparece en su sitio y parece que el
-            // texto se ha perdido. Un `View` con un `Label` dentro no lo enseña, así
-            // que el defecto se esconde justo detrás del caso de al lado.
-            self.move_align_list(start, end, dx, 0.0, true);
+            self.move_align_list(start, end, dx, 0.0, false);
         }
     }
 
