@@ -109,6 +109,7 @@ workspace.members = [
     "examples/text_selection",
     "examples/text_center",
     "examples/counter",
+    "examples/rtl",
     "examples/browser",
     "examples/camera",
     "examples/windows_blur",
