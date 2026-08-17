@@ -49,6 +49,31 @@ fn set_u32(buf: &mut [u8], offset: usize, val: u32) {
     }
 }
 
+/// Lee un `u32` del buffer del `RenderCx`. Fuera de rango devuelve 0.
+fn leer_u32(buf: &[u8], offset: usize) -> u32 {
+    if offset + 4 <= buf.len() {
+        let mut b = [0u8; 4];
+        b.copy_from_slice(&buf[offset..offset + 4]);
+        u32::from_ne_bytes(b)
+    } else {
+        0
+    }
+}
+
+/// Lee un `f32` del buffer del `RenderCx`. Fuera de rango devuelve 0.0.
+///
+/// Sólo lo usa la sonda de uniformidad de derivadas, que necesita mirar los quad
+/// buffers desde el host.
+fn leer_f32(buf: &[u8], offset: usize) -> f32 {
+    if offset + 4 <= buf.len() {
+        let mut b = [0u8; 4];
+        b.copy_from_slice(&buf[offset..offset + 4]);
+        f32::from_ne_bytes(b)
+    } else {
+        0.0
+    }
+}
+
 #[derive(Clone, Copy)]
 struct RowChunk {
     start: usize,
@@ -533,6 +558,62 @@ fn glyph_key(
     hasher.finish()
 }
 
+/// Sonda: ¿son las derivadas **constantes dentro de una instancia**?
+/// (`MAKEPAD_HEADLESS_DERIV_UNIFORM_CHECK`)
+///
+/// # Qué decide esto
+///
+/// Ya está medido que saltarse las dos pasadas de grabación vale **2,7×** en el
+/// texto (ver `record_noop`). Lo que falta es **cómo** saltárselas sin cambiar
+/// un píxel, y hay tres caminos con costes muy distintos. Esta sonda mide el
+/// dato que los separa.
+///
+/// Si los valores que el shader graba en los quad buffers **no cambian de un
+/// píxel a otro dentro de la misma instancia**, entonces basta con calcularlos
+/// **una vez por instancia** en lugar de por píxel — con un glifo de ~70 px eso
+/// es prácticamente todo el premio, y **sin tocar el compilador de shaders ni el
+/// shader de texto**. Si cambian, ese camino queda descartado de raíz y hay que
+/// ir al análisis en el compilador.
+///
+/// # Por qué es plausible y por qué NO basta con que lo parezca
+///
+/// El argumento de las cuatro derivadas del shader de glifos es `rcx.var_pos`,
+/// una varying interpolada linealmente sobre un quad alineado y sin
+/// perspectiva: su gradiente en pantalla es el mismo en todo el quad. Pero eso
+/// es un razonamiento sobre UN shader, y aquí pasan varios. Por eso se cuenta
+/// en vez de suponerse: la sonda ejecuta el camino normal **y además** compara
+/// contra lo grabado en el primer píxel de la instancia, contando discrepancias
+/// y midiendo la mayor.
+///
+/// ⚠ Cuenta píxeles, no demuestra la propiedad. Un contador en cero sobre
+/// millones de fragmentos es evidencia fuerte de que el camino barato es viable
+/// y **le quita el sitio a la duda**, pero si se implementa hay que ir con una
+/// declaración del compilador o con una comprobación viva, no con esta sonda de
+/// aval.
+fn deriv_uniform_check() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("MAKEPAD_HEADLESS_DERIV_UNIFORM_CHECK").is_ok())
+}
+
+/// Fragmentos en los que ALGÚN slot grabado no se pudo explicar como una varying
+/// del píxel vecino (sonda `deriv_uniform_check`).
+pub(crate) static DERIV_NO_UNIFORME: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+/// Fragmentos comparados por esa sonda.
+pub(crate) static DERIV_COMPARADOS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+/// Los dos anteriores, pero contando SÓLO el shader de texto — que es donde está
+/// el coste, y por tanto el único cuyo veredicto decide.
+pub(crate) static DERIV_COMPARADOS_TEXTO: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+pub(crate) static DERIV_NO_UNIFORME_TEXTO: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Fragmentos en los que el mapeo slot→varying NO coincidió con el del primer
+/// píxel de su instancia (sonda `deriv_uniform_check`).
+pub(crate) static DERIV_MAPEO_INESTABLE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// Sonda: **saltarse del todo** las dos pasadas de grabación
 /// (`MAKEPAD_HEADLESS_RECORD_NOOP`).
 ///
@@ -609,6 +690,19 @@ fn rasterize_instances_rows(
     let shift_start = flat_slots.min(varying_slots);
     // Sonda de diagnóstico: ver `record_noop`. Rompe las derivadas a propósito.
     let saltar_grabacion = record_noop();
+    // Sonda de diagnóstico: ver `deriv_uniform_check`. No cambia el resultado.
+    //
+    // Los dos quad buffers viven en `RenderCx`, que es `#[repr(C)]`, justo detrás
+    // de los cuatro `u32` de `quad_mode`/`quad_slot`/`quad_lane_x`/`quad_lane_y`
+    // (16 B) y son `[f32; 32]` cada uno. De ahí salen los offsets sin necesidad
+    // de exportar nada nuevo desde el shader.
+    let comprobar_uniformidad = deriv_uniform_check();
+    const QUAD_BUF_SLOTS: usize = 32;
+    let quad_dx_off = rcx_quad_mode_offset + 16;
+    let quad_dy_off = quad_dx_off + QUAD_BUF_SLOTS * 4;
+    let quad_bufs_caben = quad_dy_off + QUAD_BUF_SLOTS * 4 <= rcx_size;
+    // Referencia del primer píxel de la instancia en curso.
+    let mut ref_instancia: Option<[usize; QUAD_BUF_SLOTS]> = None;
     let tri_count = indices.len() / 3;
     let vary_bytes = varying_slots * std::mem::size_of::<f32>();
     let mut debug_text_prints = 0usize;
@@ -622,6 +716,9 @@ fn rasterize_instances_rows(
 
     for inst_idx in 0..instance_count {
         let inst_base = inst_idx * vertex_count;
+        // La sonda de uniformidad compara contra el primer píxel de CADA
+        // instancia, así que la referencia se olvida al cambiar de instancia.
+        ref_instancia = None;
 
         // Caja envolvente de la INSTANCIA (no del triángulo): un glifo son dos
         // triángulos y la caché se indexa por su cuadrado completo.
@@ -787,6 +884,65 @@ fn rasterize_instances_rows(
                         vary_bytes,
                         rcx_size,
                     );
+
+                    // ── Sonda: ¿cada slot grabado ES un varying? (no altera nada) ──
+                    //
+                    // Lo que se pregunta aquí NO es si los buffers son constantes
+                    // —no lo son ni tienen por qué serlo: guardan el valor de la
+                    // expresión en el píxel VECINO, que cambia con cada píxel—,
+                    // sino si ese valor coincide **exactamente** con alguna
+                    // varying del vecino. Si coincide, y siempre con la misma, el
+                    // host puede rellenar el buffer él solo y saltarse la pasada.
+                    if comprobar_uniformidad && quad_bufs_caben {
+                        let usados =
+                            (leer_u32(&rcx_buf, rcx_quad_mode_offset + 4) as usize)
+                                .min(QUAD_BUF_SLOTS);
+                        let mut mapeo = [usize::MAX; QUAD_BUF_SLOTS];
+                        let mut todos_mapeados = usados > 0;
+                        for s in 0..usados {
+                            let bx = leer_f32(&rcx_buf, quad_dx_off + s * 4);
+                            let by = leer_f32(&rcx_buf, quad_dy_off + s * 4);
+                            // El mismo índice tiene que explicar los DOS buffers:
+                            // uno solo se acierta por casualidad con facilidad.
+                            let encontrado = (0..varying_slots).find(|&i| {
+                                dx_varyings[i].to_bits() == bx.to_bits()
+                                    && dy_varyings[i].to_bits() == by.to_bits()
+                            });
+                            match encontrado {
+                                Some(i) => mapeo[s] = i,
+                                None => todos_mapeados = false,
+                            }
+                        }
+                        // Desglosado por TEXTO / resto: el premio está en el
+                        // shader de texto, así que una media global no sirve para
+                        // decidir — puede estar dominada por shaders que no
+                        // importan.
+                        if is_draw_text_shader {
+                            DERIV_COMPARADOS_TEXTO
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if !todos_mapeados {
+                                DERIV_NO_UNIFORME_TEXTO
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                        DERIV_COMPARADOS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if !todos_mapeados {
+                            DERIV_NO_UNIFORME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        // Y que el mapeo sea EL MISMO en toda la instancia: uno que
+                        // cambiara de píxel a píxel serían coincidencias, no una
+                        // identidad.
+                        match &ref_instancia {
+                            None => ref_instancia = Some(mapeo),
+                            Some(base) => {
+                                if *base != mapeo {
+                                    DERIV_MAPEO_INESTABLE
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+
                     set_u32(&mut rcx_buf, rcx_quad_mode_offset, 2);
                     set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0);
                     let write_pixel =
@@ -1168,6 +1324,27 @@ impl Cx {
                 gm_miss,
                 if gm_total > 0 { 100.0 * gm_hit as f64 / gm_total as f64 } else { 0.0 }
             );
+            // Sonda de uniformidad de derivadas: sólo dice algo si está encendida.
+            let du_cmp = DERIV_COMPARADOS.swap(0, std::sync::atomic::Ordering::Relaxed);
+            if du_cmp > 0 {
+                let du_no = DERIV_NO_UNIFORME.swap(0, std::sync::atomic::Ordering::Relaxed);
+                let du_ines = DERIV_MAPEO_INESTABLE.swap(0, std::sync::atomic::Ordering::Relaxed);
+                crate::log!(
+                    "[headless][profile] slots de derivada que SON un varying: frags={} sin_mapear={} ({:.4}%) mapeo_inestable={}",
+                    du_cmp,
+                    du_no,
+                    100.0 * du_no as f64 / du_cmp as f64,
+                    du_ines
+                );
+                let dt_cmp = DERIV_COMPARADOS_TEXTO.swap(0, std::sync::atomic::Ordering::Relaxed);
+                let dt_no = DERIV_NO_UNIFORME_TEXTO.swap(0, std::sync::atomic::Ordering::Relaxed);
+                crate::log!(
+                    "[headless][profile]   ... sólo TEXTO: frags={} sin_mapear={} ({:.4}%)",
+                    dt_cmp,
+                    dt_no,
+                    if dt_cmp > 0 { 100.0 * dt_no as f64 / dt_cmp as f64 } else { 0.0 }
+                );
+            }
             let convs = TEXTURE_CONVERSIONS.swap(0, std::sync::atomic::Ordering::Relaxed);
             let conv_px = TEXTURE_CONVERTED_PX.swap(0, std::sync::atomic::Ordering::Relaxed);
             crate::log!(
