@@ -1421,6 +1421,65 @@ fn reflejar_fila(anchos: &[f64], espaciado: f64) -> Vec<f64> {
     fuera
 }
 
+/// Reconstruye el ORDEN VISUAL de una fila que tiene rellenos aplazados.
+///
+/// # Por qué hace falta reconstruirlo
+///
+/// En una fila con `width: Fill`, `finished_walks` **no está en orden visual**.
+/// Un relleno no se puede recorrer cuando le toca —su anchura depende del hueco
+/// que sobre, y eso no se sabe hasta el final—, así que se apunta como aplazado
+/// y se dibuja después de todos los demás: sus entradas quedan **al final** de
+/// la lista aunque en pantalla estén en medio.
+///
+/// La pista para recolocarlos es `deferred_before_count`: cuántos rellenos se
+/// habían aplazado ya cuando se recorrió ese hijo. Es no decreciente en orden de
+/// dibujo, así que la fila real es «los hijos con 0 aplazados delante, luego el
+/// relleno 0, luego los que tenían 1, luego el relleno 1…».
+///
+/// # Parámetros
+///
+/// - `aplazados_antes`: el `deferred_before_count` de cada hijo NO aplazado, en
+///   orden de dibujo.
+/// - `anchos_normales`: sus anchuras, en el mismo orden.
+/// - `anchos_rellenos`: la anchura ya resuelta de cada relleno, en orden de
+///   relleno.
+///
+/// # Devuelve
+///
+/// Los índices —**dentro del tramo de la fila**— en orden visual, y sus
+/// anchuras. Los índices de los rellenos se cuentan detrás de los normales, que
+/// es donde están en `finished_walks`.
+fn orden_visual_con_rellenos(
+    aplazados_antes: &[usize],
+    anchos_normales: &[f64],
+    anchos_rellenos: &[f64],
+) -> (Vec<usize>, Vec<f64>) {
+    let n = anchos_normales.len();
+    let mut indices = Vec::with_capacity(n + anchos_rellenos.len());
+    let mut anchos = Vec::with_capacity(n + anchos_rellenos.len());
+
+    let mut puestos = 0usize;
+    for (i, &antes) in aplazados_antes.iter().enumerate() {
+        // Antes de este hijo van todos los rellenos que ya se habían aplazado
+        // cuando se le recorrió y aún no se han colocado.
+        while puestos < antes && puestos < anchos_rellenos.len() {
+            indices.push(n + puestos);
+            anchos.push(anchos_rellenos[puestos]);
+            puestos += 1;
+        }
+        indices.push(i);
+        anchos.push(anchos_normales[i]);
+    }
+    // Los rellenos que quedan van al final de la fila.
+    while puestos < anchos_rellenos.len() {
+        indices.push(n + puestos);
+        anchos.push(anchos_rellenos[puestos]);
+        puestos += 1;
+    }
+
+    (indices, anchos)
+}
+
 /// The vertical counterpart of [`row_align_x_shift`] for a `Flow::Down` column.
 ///
 /// A `height: Fill` child that draws shorter than its slot leaves genuine slack;
@@ -1791,6 +1850,25 @@ impl<'a, 'b> Cx2d<'a, 'b> {
 
                         turtle = self.turtles.last_mut().unwrap();
                     }
+
+                    // El espejo de derecha a izquierda de las filas CON rellenos.
+                    // Va aquí y no en `finish_row` porque es el primer punto del
+                    // recorrido en el que un `width: Fill` tiene anchura; allí
+                    // mide cero y reflejar con ceros deja la fila inservible
+                    // (ver el aviso en `finish_row`).
+                    //
+                    // Se aplica ENCIMA del desplazamiento de arriba, que ya dejó
+                    // cada hijo en su sitio de izquierda a derecha: los
+                    // movimientos se suman sobre las mismas instancias, así que
+                    // componer es exacto y no hace falta rehacer el reparto.
+                    if rtl && turtle.layout.mirror {
+                        self.mirror_deferred_row(turtle_walks_start);
+                        // Se vuelve a tomar el préstamo, igual que hace el bucle
+                        // de arriba en cada vuelta: `mirror_deferred_row` necesita
+                        // `self` entero y el `turtle` sigue usándose más abajo.
+                        turtle = self.turtles.last_mut().unwrap();
+                    }
+                    let _ = &turtle;
                 }
             }
             Flow::Right { wrap: true, .. } => {
@@ -2524,9 +2602,32 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         // en vertical: invertir sus posiciones en X los desparrama por la
         // pantalla. Se comprobó mirándolo — compilaba, y la pantalla salía
         // destrozada.
+        //
+        // ⚠ Y SOLO si la fila no tiene rellenos aplazados (`width: Fill`).
+        //
+        // Un `Size::Fill` en una fila NO tiene anchura durante el recorrido:
+        // `defer_walk_turtle` lo apunta con `size = dvec2(0.0, …)` y su anchura
+        // real no se decide hasta `end_turtle_with_guard`, que reparte el hueco
+        // sobrante entre los aplazados. `finish_row` corre ANTES de eso, así que
+        // aquí un hijo `Fill` mide CERO.
+        //
+        // Reflejar con esos ceros no descoloca un poco: hunde la fila entera. El
+        // tramo ocupado sale mucho más corto de lo real, los rellenos se
+        // amontonan en el mismo punto y luego `end_turtle` les suma ENCIMA su
+        // propio desplazamiento — dos correcciones compuestas sobre premisas
+        // distintas. Se ve como que lo `Fit` sobrevive y lo `Fill` desaparece o
+        // deja un fragmento de letra.
+        //
+        // Lo midió la sesión de nosvibra en el S9+ (2026-08-17), y su conclusión
+        // es la que manda: así la app queda **peor que sin voltear**. Un idioma
+        // que se lee al revés es incómodo; una pantalla en blanco no se usa.
+        //
+        // Esas filas se espejan en `end_turtle_with_guard`, que es el único sitio
+        // donde las anchuras ya existen. Ver `mirror_deferred_row`.
         let invertir = matches!(self.turtle().flow(), Flow::Right { .. })
             && self.cx.cx.reading_direction.is_rtl()
-            && self.turtle().layout.mirror;
+            && self.turtle().layout.mirror
+            && self.turtle().deferred_fills.is_empty();
         if invertir {
             self.finish_row_mirror(align_list_start);
         }
@@ -2588,6 +2689,79 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             } else {
                 align_list_start
             };
+            self.move_align_list(start, end, dx, 0.0, false);
+        }
+    }
+
+    /// El espejo de una fila que tiene rellenos aplazados (`width: Fill`).
+    ///
+    /// # Por qué es una función aparte de `finish_row_mirror`
+    ///
+    /// Porque corre en otro momento y sobre otros datos. `finish_row_mirror`
+    /// trabaja mientras se cierra la fila, con las anchuras que los hijos
+    /// declararon; ésta corre en `end_turtle_with_guard`, después de repartir el
+    /// hueco sobrante, que es **el primer instante en que un `Fill` tiene
+    /// anchura**. Fundirlas en una obligaría a que la común supiera en cuál de
+    /// los dos mundos está, y esa es justo la confusión que produjo el defecto.
+    ///
+    /// # Las dos cosas que hay que arreglar aquí y no allí
+    ///
+    /// 1. **Las anchuras**: un aplazado midió cero durante el recorrido; la
+    ///    buena está en `resolved_fills`.
+    /// 2. **El orden**: `finished_walks` no está en orden visual, porque los
+    ///    aplazados se dibujan al final. Lo reconstruye
+    ///    [`orden_visual_con_rellenos`].
+    ///
+    /// # Cuándo se aparta
+    ///
+    /// Si algún relleno se aplazó y nunca se resolvió —un widget puede pedir un
+    /// `defer_walk_turtle` y no dibujarlo— la correspondencia «los últimos N
+    /// hijos son los rellenos» deja de valer. En ese caso **no se espeja**: la
+    /// fila se queda de izquierda a derecha, que se lee mal pero se lee. Es la
+    /// lección del propio defecto que arregla esta función: reflejar con datos
+    /// que no cuadran no deja la pantalla regular, la deja en blanco.
+    fn mirror_deferred_row(&mut self, turtle_walks_start: usize) {
+        let fin = self.finished_walks.len();
+        let turtle = self.turtles.last().unwrap();
+        let n_rellenos = turtle.deferred_fills.len();
+
+        // Sin resolver todos los rellenos no se puede saber cuáles de los hijos
+        // del final son ellos. Ver «Cuándo se aparta».
+        if turtle.resolved_fills.len() != n_rellenos {
+            return;
+        }
+        // Los rellenos ocupan las últimas `n_rellenos` entradas.
+        if fin < turtle_walks_start + n_rellenos {
+            return;
+        }
+        let corte = fin - n_rellenos;
+        if fin - turtle_walks_start < 2 {
+            return;
+        }
+
+        let espaciado = turtle.spacing();
+        let aplazados_antes: Vec<usize> = (turtle_walks_start..corte)
+            .map(|i| self.finished_walks[i].deferred_before_count)
+            .collect();
+        let anchos_normales: Vec<f64> = (turtle_walks_start..corte)
+            .map(|i| self.finished_walks[i].outer_size.x)
+            .collect();
+        let anchos_rellenos: Vec<f64> = (corte..fin)
+            .map(|i| self.finished_walks[i].outer_size.x)
+            .collect();
+
+        let (orden, anchos) =
+            orden_visual_con_rellenos(&aplazados_antes, &anchos_normales, &anchos_rellenos);
+        let desplazamientos = reflejar_fila(&anchos, espaciado);
+
+        for (n, &relativo) in orden.iter().enumerate() {
+            let dx = desplazamientos[n];
+            if dx == 0.0 {
+                continue;
+            }
+            let i = turtle_walks_start + relativo;
+            let start = self.finished_walks[i].align_list_start;
+            let end = self.finished_walk_align_list_end(i);
             self.move_align_list(start, end, dx, 0.0, false);
         }
     }
@@ -3323,5 +3497,84 @@ mod rtl_tests {
         // Y el eje vertical nunca se toca: arriba es arriba en todos los idiomas.
         assert_eq!(hacer(true, true).top, 1.0);
         assert_eq!(hacer(true, true).bottom, 2.0);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // El orden visual de una fila con rellenos aplazados (`width: Fill`)
+    //
+    // Estos cuatro tests existen por un defecto medido en hierro: con `Fill` en
+    // la fila, el espejo dejaba la pantalla en blanco. La causa era que
+    // `finished_walks` NO está en orden visual —los aplazados se dibujan al
+    // final— y que sus anchuras valían cero cuando se reflejaba.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// El caso canónico: `[etiqueta] [relleno] [botón]`.
+    ///
+    /// En `finished_walks` está guardado como `[etiqueta, botón, relleno]`,
+    /// porque el relleno se dibuja el último. El orden visual tiene que devolver
+    /// el relleno a su sitio, EN MEDIO.
+    #[test]
+    fn el_relleno_vuelve_a_su_sitio_en_medio() {
+        // etiqueta: 0 aplazados delante · botón: 1 (el relleno ya se apuntó)
+        let (orden, anchos) =
+            orden_visual_con_rellenos(&[0, 1], &[40.0, 60.0], &[100.0]);
+        assert_eq!(orden, vec![0, 2, 1], "el relleno va entre los dos");
+        assert_eq!(anchos, vec![40.0, 100.0, 60.0]);
+    }
+
+    /// Un relleno al principio de la fila: `[relleno] [botón]`.
+    #[test]
+    fn un_relleno_al_principio() {
+        let (orden, anchos) = orden_visual_con_rellenos(&[1], &[30.0], &[70.0]);
+        assert_eq!(orden, vec![1, 0]);
+        assert_eq!(anchos, vec![70.0, 30.0]);
+    }
+
+    /// Un relleno al final: `[botón] [relleno]`. Es el que se cuela si el bucle
+    /// solo coloca rellenos ANTES de un hijo y se olvida de los que sobran.
+    #[test]
+    fn un_relleno_al_final() {
+        let (orden, anchos) = orden_visual_con_rellenos(&[0], &[30.0], &[70.0]);
+        assert_eq!(orden, vec![0, 1]);
+        assert_eq!(anchos, vec![30.0, 70.0]);
+    }
+
+    /// Dos rellenos separando tres hijos, que es la barra de navegación típica.
+    /// Y el remate: reflejar el resultado tiene que dar la fila del revés.
+    #[test]
+    fn dos_rellenos_y_el_reflejo_resultante() {
+        let (orden, anchos) =
+            orden_visual_con_rellenos(&[0, 1, 2], &[20.0, 30.0, 40.0], &[50.0, 60.0]);
+        assert_eq!(orden, vec![0, 3, 1, 4, 2]);
+        assert_eq!(anchos, vec![20.0, 50.0, 30.0, 60.0, 40.0]);
+
+        // Sin espaciado, para que las cuentas se lean: el tramo mide 200 y las
+        // posiciones de partida son 0, 20, 70, 100, 160.
+        let d = reflejar_fila(&anchos, 0.0);
+        // El primero (x=0, ancho 20) tiene que acabar pegado al final: x=180.
+        assert_eq!(d[0], 180.0);
+        // El último (x=160, ancho 40) tiene que acabar en x=0.
+        assert_eq!(d[4], -160.0);
+        // ⚠ El de en medio (x=70, ancho 30) se mueve **+30**, a x=100: acaba a
+        //   200-130 = 70 del final, que es lo que distaba del principio.
+        //   Escribí aquí -30 la primera vez por dar por hecho que el de en medio
+        //   «no se mueve». Se mueve salvo que la fila sea simétrica, y ésta no lo
+        //   es (20+50 = 70 por la izquierda, 60+40 = 100 por la derecha). Es la
+        //   tercera vez que esta aritmética engaña a mano; se deja anotado.
+        assert_eq!(d[2], 30.0);
+        // Y el remate que sí es invariante: reflejar deja el tramo intacto.
+        let nuevas: Vec<f64> = {
+            let mut x = 0.0;
+            let mut v = Vec::new();
+            for (i, &a) in anchos.iter().enumerate() {
+                v.push(x + d[i]);
+                x += a;
+            }
+            v
+        };
+        let ultimo = nuevas.iter().cloned().fold(f64::MIN, f64::max);
+        let primero = nuevas.iter().cloned().fold(f64::MAX, f64::min);
+        assert_eq!(primero, 0.0, "la fila reflejada sigue empezando en 0");
+        assert_eq!(ultimo, 180.0, "y el último hijo sigue acabando en el tramo");
     }
 }
