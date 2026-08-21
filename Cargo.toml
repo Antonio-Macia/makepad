@@ -43,6 +43,7 @@ workspace.members = [
     "examples/text_selection",
     "examples/counter",
     "examples/damage_bench",
+    "examples/rtl",
     "examples/browser",
     "examples/camera",
     "examples/windows_blur",
