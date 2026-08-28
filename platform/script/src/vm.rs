@@ -55,6 +55,19 @@ static ERRORES_SCRIPT: AtomicUsize = AtomicUsize::new(0);
 ///
 /// Con este contador, una app puede preguntar al arrancar si su DSL se cargó
 /// entero y **decirlo en pantalla** en vez de esperar a que alguien mire el log.
+///
+/// # 🔴 Lo que este contador NO ve, y hay que decirlo
+///
+/// Cuenta **errores de script**: tipos mal escritos, propiedades que no existen,
+/// nombres sin resolver. **No ve los fallos de reparto de espacio**, que son la
+/// otra mitad de las pantallas en blanco — un hijo `Fill` dentro de un padre
+/// `Fit`, por ejemplo, deja la vista sin dibujar y este contador dice **0**.
+/// Medido el 2026-08-28 con los dos casos delante: el DSL roto da 1, el reparto
+/// roto da 0 y la pantalla está igual de vacía.
+///
+/// O sea que un cero aquí significa «el DSL se cargó entero», y **no** «la
+/// pantalla está bien». Usarlo como si fuera lo segundo es cambiar un fallo mudo
+/// por un verde falso, que es peor.
 pub fn errores_de_script() -> usize {
     ERRORES_SCRIPT.load(Ordering::Relaxed)
 }
