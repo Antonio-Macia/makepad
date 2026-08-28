@@ -1,4 +1,6 @@
 use crate::function::*;
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 use crate::heap::*;
 use crate::makepad_error_log::*;
 use crate::makepad_live_id::*;
@@ -23,6 +25,45 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ERRORES DE SCRIPT VISIBLES
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Cuántos errores de script se han registrado desde que arrancó el proceso.
+static ERRORES_SCRIPT: AtomicUsize = AtomicUsize::new(0);
+
+/// Cuántos errores de script van. **Cero es la única cifra buena.**
+///
+/// # Por qué existe (2026-08-28)
+///
+/// Un error de tipo en el DSL —`align: {x: 0.5}` en vez de `align: Align{…}`—
+/// **aborta el resto del bloque** y deja la pantalla en blanco. Y hasta hoy la
+/// única pista era una línea en la consola, o sea **en un sitio donde nadie
+/// mira**: el compilador ya ha dicho que todo va bien, así que no hay nada que
+/// empuje a abrirla.
+///
+/// Lo reportó la sesión de ÓRBITAS tras perder media tarde, y lo describe mejor
+/// que nadie: *«el síntoma "no se pinta nada" tiene al menos tres causas
+/// distintas y son indistinguibles a ojo»* — propiedad mal escrita, fuentes aún
+/// cargando, o un `Fit` que colapsa la columna. Diagnosticaron mal dos veces y
+/// revirtieron un cambio que era correcto.
+///
+/// Y la cara peor: **un error tapó a otro**. Con el primero abortando el bloque,
+/// el segundo (`height: Fill` en una cabecera) no existía todavía; apareció al
+/// arreglar el primero, y pareció culpa del arreglo.
+///
+/// Con este contador, una app puede preguntar al arrancar si su DSL se cargó
+/// entero y **decirlo en pantalla** en vez de esperar a que alguien mire el log.
+pub fn errores_de_script() -> usize {
+    ERRORES_SCRIPT.load(Ordering::Relaxed)
+}
+
+/// Pone el contador a cero. Para comprobar un bloque concreto: se pone a cero
+/// antes de registrarlo y se lee después.
+pub fn reiniciar_errores_de_script() {
+    ERRORES_SCRIPT.store(0, Ordering::Relaxed);
+}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub struct ScriptModKey {
@@ -594,6 +635,23 @@ impl<'a> ScriptVm<'a> {
                 }
                 if self.bx.silence_errors {
                     continue;
+                }
+                // Se cuenta ANTES de decidir cómo formatearlo: los tres caminos
+                // de abajo son el mismo error con más o menos información de
+                // localización, y contarlo en cada uno sería contarlo tres veces
+                // o —peor— olvidarse en el que menos se prueba.
+                ERRORES_SCRIPT.fetch_add(1, Ordering::Relaxed);
+                // Y con `MAKEPAD_SCRIPT_ERRORS_FATAL=1`, el proceso muere aquí.
+                // Es opt-in a propósito: hacerlo siempre tumbaría apps que hoy
+                // arrancan con un error menor, y esa decisión no es de esta capa.
+                // Quien lo enciende quiere justo esto — que un DSL mal escrito se
+                // note en el sitio y en el momento, no media tarde después.
+                #[cfg(not(target_arch = "wasm32"))]
+                if std::env::var("MAKEPAD_SCRIPT_ERRORS_FATAL").as_deref() == Ok("1") {
+                    panic!(
+                        "error de script con MAKEPAD_SCRIPT_ERRORS_FATAL=1: {}",
+                        err.message
+                    );
                 }
                 if let Some(ptr) = err.value.as_err() {
                     if let Some(loc2) = self.bx.code.ip_to_loc(ptr.ip) {
