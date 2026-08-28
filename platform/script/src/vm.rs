@@ -56,6 +56,26 @@ static ERRORES_SCRIPT: AtomicUsize = AtomicUsize::new(0);
 /// Con este contador, una app puede preguntar al arrancar si su DSL se cargó
 /// entero y **decirlo en pantalla** en vez de esperar a que alguien mire el log.
 ///
+/// # 🔴 Enséñalo EN PANTALLA. Mandarlo al log no sirve de nada
+///
+/// Y hay que decirlo así de fuerte porque **la función invita a lo contrario**:
+/// devuelve un número, y lo natural con un número es loguearlo. La sesión de
+/// ÓRBITAS escribió justo eso en su primera versión —`errores_de_script()` al
+/// log— teniendo el caso reciente y habiendo pedido ella misma el contador.
+///
+/// Si el aviso acaba en el log, no se ha arreglado nada: **la pista ya estaba en
+/// el log**, y el problema entero es que ahí no la busca nadie. El compilador ya
+/// dijo que todo iba bien, así que no hay motivo para abrir la consola.
+///
+/// ```ignore
+/// // Al arrancar, donde el usuario lee el resto:
+/// let n = errores_de_script();
+/// if n > 0 {
+///     ui.label(cx, ids!(aviso))
+///         .set_text(cx, &format!("⚠ {n} errores de DSL: la interfaz está incompleta"));
+/// }
+/// ```
+///
 /// # 🔴 Lo que este contador NO ve, y hay que decirlo
 ///
 /// Cuenta **errores de script**: tipos mal escritos, propiedades que no existen,
