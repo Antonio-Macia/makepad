@@ -16,9 +16,90 @@ pub enum AndroidVariant {
     Quest,
 }
 
+/// Qué familias de fuentes grandes se sustituyen por una pequeña al empaquetar.
+///
+/// # Por qué es un CONJUNTO y no un `bool` (2026-08-29)
+///
+/// Hasta hoy era `--small-fonts` a secas: quitaba las tres fuentes grandes
+/// **de golpe** — las dos CJK y el emoji a color. Eso deja fuera a quien más lo
+/// necesita: una app que enseña nombres en japonés, coreano o chino **no puede
+/// usarlo**, porque perdería justo los glifos que su contenido necesita, y se
+/// queda cargando también los 10 MB del emoji que no usa nadie.
+///
+/// Lo trajo la sesión de ÓRBITA con la medida delante: de los 35 MB de fuentes
+/// de su APK, las CJK las necesitan de verdad y el emoji a color no.
+///
+/// `--small-fonts` sin valor sigue significando **todas**, para no romper a
+/// quien ya lo usa.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SmallFonts {
+    /// LXGWWenKai (chino/japonés/coreano). ~36 MB.
+    pub cjk: bool,
+    /// NotoColorEmoji (emoji a color). ~10 MB.
+    pub emoji: bool,
+    /// GoNotoKurrent (cobertura Unicode amplia).
+    pub unicode: bool,
+    /// Si el usuario NOMBRÓ los grupos (`--small-fonts=emoji`) o pidió todas
+    /// (`--small-fonts` a secas).
+    ///
+    /// 🔴 Existe sólo para decidir **cuándo avisar**, y es importante: si un
+    /// grupo pedido no sustituye nada, avisar está bien; pero avisar de eso en
+    /// cada build de quien pidió «todas» —sin nombrar nada— sería un aviso
+    /// permanente. Y un aviso que sale siempre es ruido: la gente aprende a
+    /// saltárselo, y el día que falte una fuente de verdad tampoco lo lee.
+    pub explicitos: bool,
+}
+
+impl SmallFonts {
+    /// Todas: lo que `--small-fonts` ha significado siempre.
+    pub fn todas() -> Self {
+        Self { cjk: true, emoji: true, unicode: true, explicitos: false }
+    }
+
+    /// ¿Hay algo que sustituir?
+    pub fn alguna(&self) -> bool {
+        self.cjk || self.emoji || self.unicode
+    }
+
+    /// Enciende un grupo por su nombre. `Err` con los válidos si no existe.
+    ///
+    /// Falla en vez de ignorar a propósito: un nombre mal escrito que se acepta
+    /// en silencio produce una APK del tamaño de siempre y **nadie se entera**,
+    /// que es exactamente el fallo que este flag viene a evitar.
+    pub fn encender(&mut self, nombre: &str) -> Result<(), String> {
+        self.explicitos = true;
+        match nombre.trim() {
+            "cjk" => self.cjk = true,
+            "emoji" => self.emoji = true,
+            "unicode" => self.unicode = true,
+            "todas" | "all" => {
+                self.cjk = true;
+                self.emoji = true;
+                self.unicode = true;
+            }
+            otro => {
+                return Err(format!(
+                    "--small-fonts: grupo de fuentes desconocido «{otro}». \
+                     Los válidos son: cjk, emoji, unicode, todas."
+                ))
+            }
+        }
+        Ok(())
+    }
+
+    /// Los grupos encendidos, por nombre. Para los avisos.
+    pub fn nombres(&self) -> Vec<&'static str> {
+        let mut v = Vec::new();
+        if self.cjk { v.push("cjk"); }
+        if self.emoji { v.push("emoji"); }
+        if self.unicode { v.push("unicode"); }
+        v
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AndroidConfig {
-    pub small_fonts: bool,
+    pub small_fonts: SmallFonts,
 }
 
 /// All values needed to render an `AndroidManifest.xml`. Constructed by
@@ -713,7 +794,21 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
         } else if let Some(opt) = v.strip_prefix("--variant=") {
             variant = AndroidVariant::from_str(opt)?;
         } else if v.trim() == "--small-fonts" {
-            config.small_fonts = true;
+            // Sin valor = todas, que es lo que ha significado siempre.
+            config.small_fonts = SmallFonts::todas();
+        } else if let Some(grupos) = v.trim().strip_prefix("--small-fonts=") {
+            // Con valor = sólo esos grupos: `--small-fonts=emoji`,
+            // `--small-fonts=cjk,emoji`.
+            for g in grupos.split(',').filter(|g| !g.trim().is_empty()) {
+                config.small_fonts.encender(g)?;
+            }
+            if !config.small_fonts.alguna() {
+                return Err(
+                    "--small-fonts= sin ningún grupo. Pon al menos uno \
+                     (cjk, emoji, unicode) o usa `--small-fonts` a secas."
+                        .to_string(),
+                );
+            }
         } else if v.trim() == "--no-icon" {
             no_icon = true;
         } else if v.trim() == "--keep-sdk-sources" {
