@@ -406,8 +406,24 @@ script_mod! {
                 // past that the SDF used to degenerate into a rotated diamond
                 // (e.g. a 22px disc with r=11), instead of saturating at a circle.
                 let k = min(2. * r, min(size.x, size.y));
-                let bp = max(abs(p - size.xy) - (size.xy - vec2(k, k).xy), vec2(0., 0.));
-                self.dist = (length(bp) - k) / self.scale_factor;
+                let d = abs(p - size.xy) - (size.xy - vec2(k, k).xy);
+                // 🔴 El termino INTERIOR (`min(max(d.x, d.y), 0.)`) es lo que hace
+                // que dentro de la caja la distancia sea NEGATIVA. Sin el, esta
+                // funcion hacia `length(max(d, 0.)) - k`, que dentro vale siempre
+                // `-k`… y con `r = 0` vale **CERO**: para el SDF, todo el interior
+                // era borde. El sintoma no es un error, es un dibujo: la caja sale
+                // RELLENA DEL COLOR DEL TRAZO, y el `fill_keep` no se ve.
+                //
+                // Lo reporto ORBITA queriendo esquinas vivas en un cartucho de
+                // tebeo, que es el caso natural de `r = 0`. Medido lado a lado
+                // contra `sdf.rect`, que siempre estuvo bien porque el si lleva
+                // ese termino.
+                //
+                // Para `r > 0` el cambio tambien corrige: antes el interior era la
+                // constante `-k` en vez de la distancia real al borde. Fuera de la
+                // caja `max(d.x, d.y) > 0`, asi que `min(.., 0.)` es 0 y el
+                // resultado no cambia — o sea que ningun contorno se mueve.
+                self.dist = (min(max(d.x, d.y), 0.) + length(max(d, vec2(0., 0.))) - k) / self.scale_factor;
                 self.old_shape = self.shape;
                 self.shape = min(self.shape, self.dist);
             }
