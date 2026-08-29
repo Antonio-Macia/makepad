@@ -652,6 +652,10 @@ impl Widget for DropDown {
                 self.animator_play(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
+                // Devolver el cursor: quien atiende el hover lo fija, y si al
+                // salir nadie lo repone se queda el ultimo puesto. Ver el
+                // comentario largo en `button.rs`.
+                cx.set_cursor(MouseCursor::Default);
                 self.animator_play(cx, ids!(hover.off));
             }
             Hit::FingerUp(fe) if fe.is_primary_hit() => {
