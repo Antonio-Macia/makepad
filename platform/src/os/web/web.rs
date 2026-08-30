@@ -704,6 +704,12 @@ impl Cx {
                     let pos = area.clipped_rect(self).pos + cursor_rect.pos + cursor_rect.size;
                     let window_id = self.get_window_id_of(&area).unwrap_or(CxWindowPool::id_zero());
                     let pos = self.windows[window_id].layout_vec2d_to_native_points(pos);
+                    // Solo si algo ha cambiado de verdad: esta rama se recorre
+                    // en cada fotograma mientras un campo tiene el foco.
+                    if self.os.ultimo_ime == Some((pos.x, pos.y, config)) {
+                        continue;
+                    }
+                    self.os.ultimo_ime = Some((pos.x, pos.y, config));
                     let kb = config.soft_keyboard;
                     self.os.from_wasm(FromWasmShowTextIME {
                         x: pos.x,
@@ -722,6 +728,9 @@ impl Cx {
                     });
                 }
                 CxOsOp::HideTextIME => {
+                    // Se olvida lo enviado: al volver a enseñarlo hay que
+                    // mandarlo entero, aunque coincida con lo de antes.
+                    self.os.ultimo_ime = None;
                     self.os.from_wasm(FromWasmHideTextIME {});
                 }
                 CxOsOp::CopyToClipboard(_) => {
@@ -1213,6 +1222,20 @@ pub struct CxOs {
     pub(crate) from_wasm_js: Vec<String>,
 
     pub(crate) media: CxWebMedia,
+
+    /// Lo último que se le mandó al navegador sobre el IME, para no repetirlo.
+    ///
+    /// 🔴 `show_text_ime_with_config` se llama desde `draw_walk`, o sea **en
+    /// cada fotograma** mientras un campo tiene el foco. Sin esto, un cursor
+    /// parpadeando en un campo de texto manda 60 mensajes por segundo a través
+    /// del puente de wasm —serializar, cruzar, tocar el DOM— para volver a
+    /// decir exactamente lo mismo. Medido en un S9+: 4 por segundo con la
+    /// pantalla quieta, y sube con la tasa de refresco.
+    ///
+    /// No es solo gasto: cada uno toca atributos del `textarea`, y cambiar el
+    /// `inputmode` de un campo enfocado es justo lo que puede hacer que un
+    /// teclado se cierre y se vuelva a abrir.
+    pub(crate) ultimo_ime: Option<(f64, f64, TextInputConfig)>,
 }
 
 impl Default for CxOs {
@@ -1230,6 +1253,7 @@ impl Default for CxOs {
             from_wasm_js: Vec::new(),
 
             media: CxWebMedia::default(),
+            ultimo_ime: None,
         }
     }
 }
@@ -1295,7 +1319,9 @@ pub unsafe extern "C" fn init_panic_hook() {
 #[no_mangle]
 pub static mut BASE_ADDR: usize = 10;
 
-use crate::ime::{AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, TextInputContentType};
+use crate::ime::{
+    AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, TextInputConfig, TextInputContentType,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Traducción de la configuración de teclado a los atributos de HTML.

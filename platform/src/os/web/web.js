@@ -1724,9 +1724,26 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     bind_keyboard() {
-        if (this.detect.is_mobile_safari || this.detect.is_android) { // mobile keyboards are unusable on a UI like this. Not happening.
-            return
-        }
+        // 🔴 AQUI HABIA UN `return` PARA MOVILES, y era la causa de que en un
+        // telefono no se pudiera escribir NADA en una aplicacion web de makepad.
+        // Decia, literalmente:
+        //
+        //     if (is_mobile_safari || is_android) {
+        //         // mobile keyboards are unusable on a UI like this. Not happening.
+        //         return
+        //     }
+        //
+        // O sea que en movil no se creaba el campo oculto, y sin campo no hay
+        // foco, sin foco no hay teclado, y sin teclado no hay forma de escribir.
+        // No daba error: el campo de la aplicacion se enfocaba, el cursor
+        // parpadeaba, y el teclado no subia. Lo reporto ORBITA en su buscador.
+        //
+        // Se quita. La decision de 2019 puede que fuera razonable entonces; hoy
+        // una aplicacion web en un movil sin poder escribir no es una decision de
+        // diseño, es una aplicacion rota. Lo que hacia falta para que funcione
+        // —enfocar DENTRO del gesto del usuario, respetar que el usuario baje el
+        // teclado, y mandar la configuracion del campo— esta en este mismo
+        // commit.
 
         var ta = this.text_area = document.createElement('textarea')
         ta.className = "cx_webgl_textinput"
@@ -1743,7 +1760,12 @@ export class WasmWebBrowser extends WasmBridge {
             + "opacity: 0;\n"
             + "border-radius: 4px;\n"
             + "color:white;\n"
-            + "font-size: 6;\n"
+            // ⚠ 16px y no menos: Safari en iOS hace ZOOM sobre la pagina al
+            // enfocar un campo con la letra mas pequeña, y como el campo esta a
+            // opacidad 0 lo que se ve es que la interfaz da un salto de escala
+            // sola al tocar un texto. El campo es invisible, asi que el tamaño
+            // no afecta a nada mas.
+            + "font-size: 16px;\n"
             + "background: gray;\n"
             + "-moz-appearance: none;\n"
             + "appearance:none;\n"
