@@ -70,6 +70,9 @@ workspace.members = [
     # tools/studio_embed_host/src/main.rs.
     "tools/studio_embed_host",
     "tools/studio_embed_probe",
+    # Sonda de un campo de busqueda para medir si el teclado de un movil sube en
+    # el navegador. Ver tools/sonda_teclado_movil/src/lib.rs.
+    "tools/sonda_teclado_movil",
     # === tests ===
     "platform/script/test",
 ]

@@ -169,6 +169,11 @@ export class WasmWebBrowser extends WasmBridge {
             this.emit_location_change();
             this.do_wasm_pump();
         });
+        // Enfocar de salida es lo que hace que el teclado fisico funcione sin
+        // tener que pulsar antes. En un movil no levanta nada —fuera de un gesto
+        // el navegador lo ignora— asi que no hay que excluirlo; lo unico que hay
+        // que evitar es que la pagina se desplace hasta un textarea de 1x1 que
+        // esta fuera de la pantalla, y de eso se encarga `preventScroll`.
         this.focus_keyboard_input();
         this.to_wasm.ToWasmRedrawAll();
         this.start_signal_poll();
@@ -452,12 +457,65 @@ export class WasmWebBrowser extends WasmBridge {
         this.text_copy_response = args.response
     }
 
+    // 🔴 ESTA ES LA FUNCION QUE ABRE EL TECLADO DE UN MOVIL, y durante mucho
+    // tiempo no lo hacia: solo movia el textarea de sitio.
+    //
+    // En escritorio no se notaba porque el foco lo pedia `on_mouse_down`, y hay
+    // un teclado fisico de todas formas. En un movil no llega ningun
+    // `mousedown`: los manejadores tactiles hacen `preventDefault()`, y eso
+    // cancela los eventos de raton sintéticos. Resultado: el campo se marcaba
+    // como enfocado, el cursor parpadeaba, y el teclado no subia nunca. Sin
+    // error, porque no hay error: nadie pidio el foco.
+    //
+    // ⚠ Y el `focus()` tiene que ocurrir DENTRO del gesto del usuario. Los
+    // navegadores solo levantan el teclado en pantalla si el foco se pide
+    // durante un `touchstart`/`touchend`/`click`; pedido desde un
+    // `requestAnimationFrame` no hace nada y tampoco avisa. Por eso el lado Rust
+    // pide el IME al recibir el FOCO (`Hit::KeyFocus`) y no al dibujar: el pump
+    // del evento tactil es sincrono, asi que este mensaje llega dentro del
+    // manejador del toque. Si algun dia se mueve esa llamada de vuelta al
+    // dibujado, esto deja de funcionar en movil y sigue funcionando en el
+    // escritorio donde se prueba.
     FromWasmShowTextIME(args) {
         this.update_text_area_pos(args);
+        this.apply_text_area_config(args);
+        let ta = this.text_area;
+        if (!ta) return;
+        // Diagnostico, para poder MEDIR esto desde la propia pagina —incluso
+        // desde un movil, donde no hay forma comoda de instrumentar—:
+        //   window.__makepad_ime
+        window.__makepad_ime = {
+            en_gesto: !!this.en_gesto,
+            input_mode: args.input_mode,
+            enter_key_hint: args.enter_key_hint,
+            es_movil: !!this.es_movil,
+        };
+        if (this.es_movil && !this.en_gesto && !this.aviso_ime_fuera_de_gesto) {
+            this.aviso_ime_fuera_de_gesto = true;
+            console.warn(
+                "makepad: se pidio el teclado FUERA de un gesto del usuario. En un movil " +
+                "el navegador ignora eso y el teclado no subira, sin dar ningun error. " +
+                "La peticion tiene que salir del manejador del toque: mira el arm " +
+                "Hit::KeyFocus de widgets/src/text_input.rs, que es quien la emite a tiempo."
+            );
+        }
+        // Re-enfocar lo ya enfocado hace que algunos navegadores desplacen la
+        // pagina de golpe, asi que solo si hace falta.
+        if (document.activeElement !== ta) {
+            ta.focus({preventScroll: true});
+        }
     }
 
     FromWasmHideTextIME() {
         this.update_text_area_pos({ x: -3000, y: -3000 });
+        // En un movil, «esconder el IME» significa CERRAR el teclado, y lo unico
+        // que lo cierra es soltar el foco. En escritorio no se suelta: ahi el
+        // textarea enfocado es lo que hace que sigan llegando las teclas, y
+        // soltarlo dejaria la aplicacion sorda.
+        if (this.es_movil && this.text_area && document.activeElement === this.text_area) {
+            this.ime_hidden_by_app = true;
+            this.text_area.blur();
+        }
     }
     /*
     FromWasmWebSocketOpen(args) {
@@ -1250,6 +1308,23 @@ export class WasmWebBrowser extends WasmBridge {
         from_wasm.free();
     }
 
+    // Igual que `do_wasm_pump`, pero dejando dicho que estamos dentro de un
+    // gesto del usuario.
+    //
+    // 🔴 De esto depende que el teclado suba en un movil, y es una propiedad
+    // fragil: basta con que alguien mueva la peticion del IME al dibujado para
+    // que deje de cumplirse, y entonces falla SOLO en moviles y SOLO en el
+    // navegador — o sea, en ningun sitio donde se pruebe. Por eso se marca y se
+    // comprueba, en vez de confiar en que siga siendo verdad.
+    pump_dentro_del_gesto() {
+        this.en_gesto = true;
+        try {
+            this.do_wasm_pump();
+        } finally {
+            this.en_gesto = false;
+        }
+    }
+
     do_wasm_pump() {
         let started = performance.now();
         this.buffer_upload_serial += 1;
@@ -1293,6 +1368,20 @@ export class WasmWebBrowser extends WasmBridge {
         };
 
         this.detect.is_android = this.detect.user_agent.match(/Android/i)
+        // 🔴 «¿Es un movil?» para lo que decide el teclado, y NO es lo mismo que
+        // «¿tiene pantalla tactil?».
+        //
+        // `ontouchstart`/`maxTouchPoints` da CIERTO en un portatil Windows con
+        // pantalla tactil, que tiene raton y teclado fisico. Tratarlo como movil
+        // le quitaria el foco al campo oculto y la aplicacion se quedaria sorda
+        // a las teclas — un fallo que no aparece en ningun movil ni en ningun
+        // escritorio sin tactil, o sea en ninguna maquina donde se prueba.
+        //
+        // `(pointer: coarse) and (hover: none)` es la pregunta de verdad: el
+        // puntero principal es un dedo y no hay raton. Cierto en telefonos y
+        // tabletas, falso en el portatil tactil.
+        this.es_movil = window.matchMedia
+            && window.matchMedia('(pointer: coarse) and (hover: none)').matches;
         this.detect.is_add_to_homescreen_safari = this.is_mobile_safari && navigator.standalone
     }
 
@@ -1463,11 +1552,20 @@ export class WasmWebBrowser extends WasmBridge {
         //let current_mouse_down = null;
         this.handlers.on_mouse_down = e => {
             e.preventDefault();
+            // Se enfoca en cualquier pulsacion de RATON, y sin condicion: es lo
+            // que hace que el teclado fisico funcione sin tener que pulsar en un
+            // campo antes.
+            //
+            // No hace falta excluir el movil aqui, y excluirlo seria peor: en un
+            // telefono este manejador **no se ejecuta nunca**, porque los
+            // manejadores tactiles hacen `preventDefault()` y eso cancela los
+            // eventos de raton sinteticos. Es justamente la razon de que el
+            // teclado no subiera.
             this.focus_keyboard_input();
             //if (current_mouse_down === null || current_mouse_down === e.button){
             //    current_mouse_down = e.button;
             this.to_wasm.ToWasmMouseDown({ mouse: mouse_to_wasm_wmouse(e) });
-            this.do_wasm_pump();
+            this.pump_dentro_del_gesto();
             //}
         }
 
@@ -1551,7 +1649,10 @@ export class WasmWebBrowser extends WasmBridge {
                 modifiers: pack_key_modifier(e),
                 touches: touches_to_wasm_wtouches(e, 1)
             });
-            this.do_wasm_pump();
+            // El pump es SINCRONO, asi que todo lo que el lado Rust decida por
+            // este toque —incluido pedir el teclado— sale de aqui dentro, que es
+            // el unico momento en que un navegador deja levantar el teclado.
+            this.pump_dentro_del_gesto();
             return false
         }
 
@@ -1573,7 +1674,7 @@ export class WasmWebBrowser extends WasmBridge {
                 modifiers: pack_key_modifier(e),
                 touches: touches_to_wasm_wtouches(e, 3)
             });
-            this.do_wasm_pump();
+            this.pump_dentro_del_gesto();
             return false
         }
 
@@ -1785,6 +1886,28 @@ export class WasmWebBrowser extends WasmBridge {
         ta.addEventListener('contextmenu', e => this.handlers.on_contextmenu(e));
 
         ta.addEventListener('blur', e => {
+            // 🔴 En escritorio hay que recuperar el foco: si el textarea lo
+            // pierde, dejan de llegar las teclas y la aplicacion se queda sorda.
+            //
+            // En un movil esta misma linea ATRAPA EL TECLADO ABIERTO. Ahi perder
+            // el foco es como el usuario cierra el teclado —con la tecla de
+            // atras o el gesto—, y volver a pedirlo lo levanta otra vez: la
+            // pantalla se queda con medio alto comido y sin forma de
+            // recuperarlo. Asi que en tactil se respeta, y se le dice al lado
+            // Rust que el IME se cerro, que es justo para lo que existe
+            // `text_ime_was_dismissed`.
+            if (this.es_movil) {
+                if (this.ime_hidden_by_app) {
+                    // Lo cerramos nosotros al perder el campo el foco: eso no es
+                    // el usuario descartando el teclado, y contarlo como tal
+                    // dejaria el siguiente campo sin teclado.
+                    this.ime_hidden_by_app = false;
+                    return;
+                }
+                this.to_wasm.ToWasmTextIMEWasDismissed();
+                this.do_wasm_pump();
+                return;
+            }
             this.focus_keyboard_input();
         })
 
@@ -1881,7 +2004,39 @@ export class WasmWebBrowser extends WasmBridge {
 
     focus_keyboard_input() {
         if (!this.text_area) return;
-        this.text_area.focus();
+        this.text_area.focus({preventScroll: true});
+    }
+
+    // Ponerle al campo oculto la ropa del campo que el usuario acaba de tocar.
+    //
+    // Es lo que decide QUE teclado sale en un movil: un buscador con
+    // `inputmode="search"` y `enterkeyhint="search"` saca un teclado con tecla
+    // de buscar, y sin ellos sale el generico con un intro que mete un salto de
+    // linea. Hasta hoy el mensaje del puente solo traia una posicion, asi que
+    // todos los campos del ecosistema salian iguales en el movil.
+    //
+    // ⚠ Los atributos se ponen ANTES del `focus()`, y no es un detalle de
+    // estilo: el navegador decide el teclado en el momento de enfocar, asi que
+    // cambiarlos despues no cambia nada hasta el siguiente foco — y eso se ve
+    // como «la primera vez sale mal y luego bien», que es de los sintomas mas
+    // dificiles de atribuir.
+    apply_text_area_config(cfg) {
+        let ta = this.text_area;
+        if (!ta || !cfg) return;
+        // `inputmode="none"` es lo que pide un campo que se rellena solo (un
+        // teclado propio dibujado por la app): dice «no levantes el teclado del
+        // sistema» sin renunciar al foco ni a las teclas fisicas.
+        if (cfg.input_mode !== undefined) ta.setAttribute('inputmode', cfg.input_mode);
+        if (cfg.enter_key_hint !== undefined) ta.setAttribute('enterkeyhint', cfg.enter_key_hint);
+        if (cfg.autocapitalize !== undefined) ta.setAttribute('autocapitalize', cfg.autocapitalize);
+        if (cfg.autocorrect !== undefined) {
+            ta.setAttribute('autocorrect', cfg.autocorrect);
+            // `spellcheck` es el que respetan Chrome y Firefox; `autocorrect` es
+            // de Safari. Hacen falta los dos o el subrayado rojo aparece en la
+            // mitad de los navegadores.
+            ta.setAttribute('spellcheck', cfg.autocorrect === 'on' ? 'true' : 'false');
+        }
+        if (cfg.autocomplete !== undefined) ta.setAttribute('autocomplete', cfg.autocomplete);
     }
 }
 

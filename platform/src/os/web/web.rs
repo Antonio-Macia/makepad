@@ -303,6 +303,13 @@ impl Cx {
                     self.call_event_handler(&Event::WindowLostFocus(window_id));
                 }
 
+                live_id!(ToWasmTextIMEWasDismissed) => {
+                    // Apunta que está cerrado y suelta un `HideTextIME`, para
+                    // que el dibujado siguiente no vuelva a levantarlo. Es la
+                    // misma puerta que usan Android e iOS.
+                    self.text_ime_was_dismissed();
+                }
+
                 live_id!(ToWasmRedrawAll) => {
                     self.redraw_all();
                 }
@@ -691,14 +698,28 @@ impl Cx {
                 CxOsOp::XrStopPresenting => {
                     self.os.from_wasm(FromWasmXrStopPresenting {});
                 }
-                CxOsOp::ShowTextIME(area, cursor_rect, _config) => {
+                CxOsOp::ShowTextIME(area, cursor_rect, config) => {
                     // Bottom of the caret line (matches the pre-rect point); the
                     // hidden-textarea IME anchor only takes a point.
                     let pos = area.clipped_rect(self).pos + cursor_rect.pos + cursor_rect.size;
                     let window_id = self.get_window_id_of(&area).unwrap_or(CxWindowPool::id_zero());
                     let pos = self.windows[window_id].layout_vec2d_to_native_points(pos);
-                    self.os
-                        .from_wasm(FromWasmShowTextIME { x: pos.x, y: pos.y });
+                    let kb = config.soft_keyboard;
+                    self.os.from_wasm(FromWasmShowTextIME {
+                        x: pos.x,
+                        y: pos.y,
+                        input_mode: web_input_mode(kb.input_mode).to_string(),
+                        enter_key_hint: web_enter_key_hint(
+                            kb.return_key_type,
+                            config.submit_on_enter,
+                        )
+                        .to_string(),
+                        autocapitalize: web_autocapitalize(kb.autocapitalize).to_string(),
+                        autocorrect: web_autocorrect(kb.autocorrect).to_string(),
+                        autocomplete: web_autocomplete(config.content_type, config.is_secure)
+                            .to_string(),
+                        is_multiline: config.is_multiline,
+                    });
                 }
                 CxOsOp::HideTextIME => {
                     self.os.from_wasm(FromWasmHideTextIME {});
@@ -968,6 +989,7 @@ impl CxOsApi for Cx {
             ToWasmLocationChange::to_js_code(),
             ToWasmWindowGotFocus::to_js_code(),
             ToWasmWindowLostFocus::to_js_code(),
+            ToWasmTextIMEWasDismissed::to_js_code(),
             ToWasmHTTPResponse::to_js_code(),
             ToWasmHttpRequestError::to_js_code(),
             ToWasmHttpResponseProgress::to_js_code(),
@@ -1272,3 +1294,105 @@ pub unsafe extern "C" fn init_panic_hook() {
 
 #[no_mangle]
 pub static mut BASE_ADDR: usize = 10;
+
+use crate::ime::{AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, TextInputContentType};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Traducción de la configuración de teclado a los atributos de HTML.
+//
+// Es una traducción de nombres, no de conceptos: `InputMode` se documenta a sí
+// mismo como «matches web standard `inputmode` attribute», así que la tabla es
+// corta a propósito. Vive aquí, en Rust, y no en JS, por una razón concreta:
+// si la conversión estuviera en el puente de JavaScript, cada valor nuevo del
+// enum llegaría al navegador como una cadena que nadie reconoce y el atributo se
+// quedaría vacío **sin error**. En Rust, un valor nuevo rompe el `match` en
+// tiempo de compilación, que es donde se quiere que rompa.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `inputmode`: qué teclado ofrece el teléfono.
+fn web_input_mode(m: InputMode) -> &'static str {
+    match m {
+        InputMode::None => "none",
+        // `Ascii` no tiene equivalente en web; «text» es lo más cercano y no
+        // miente. Poner un valor inventado dejaría el atributo inválido, que el
+        // navegador ignora en silencio.
+        InputMode::Text | InputMode::Ascii => "text",
+        InputMode::Url => "url",
+        InputMode::Numeric => "numeric",
+        InputMode::Tel => "tel",
+        InputMode::Email => "email",
+        InputMode::Decimal => "decimal",
+        InputMode::Search => "search",
+    }
+}
+
+/// `enterkeyhint`: qué pone la tecla de retorno y qué hace.
+///
+/// El estándar sólo admite siete valores, y varios del enum (Google, Yahoo,
+/// Route, EmergencyCall) son de iOS y no tienen equivalente: se mapean al más
+/// cercano en vez de a una cadena inválida que el navegador tiraría sin decirlo.
+fn web_enter_key_hint(k: ReturnKeyType, submit_on_enter: bool) -> &'static str {
+    match k {
+        ReturnKeyType::Go | ReturnKeyType::Join | ReturnKeyType::Route => "go",
+        ReturnKeyType::Search | ReturnKeyType::Google | ReturnKeyType::Yahoo => "search",
+        ReturnKeyType::Send => "send",
+        ReturnKeyType::Next | ReturnKeyType::Continue => "next",
+        ReturnKeyType::Previous => "previous",
+        ReturnKeyType::Done | ReturnKeyType::EmergencyCall => "done",
+        // Sin preferencia explícita: si el campo se envía con Enter, la tecla
+        // debería decirlo. Es la diferencia entre un salto de línea y buscar.
+        ReturnKeyType::Default | ReturnKeyType::None => {
+            if submit_on_enter {
+                "done"
+            } else {
+                "enter"
+            }
+        }
+    }
+}
+
+/// `autocapitalize`.
+fn web_autocapitalize(a: AutoCapitalize) -> &'static str {
+    match a {
+        AutoCapitalize::None => "none",
+        AutoCapitalize::Words => "words",
+        AutoCapitalize::Sentences => "sentences",
+        AutoCapitalize::AllCharacters => "characters",
+    }
+}
+
+/// `autocorrect` (`on`/`off`).
+fn web_autocorrect(a: AutoCorrect) -> &'static str {
+    match a {
+        AutoCorrect::Default | AutoCorrect::Enabled => "on",
+        AutoCorrect::Disabled => "off",
+    }
+}
+
+/// `autocomplete`: la pista de autorrelleno.
+///
+/// ⚠ El campo oculto es un `<textarea>`, así que **no hay enmascarado real de
+/// contraseña en web**: lo que se ve lo pinta la aplicación, no el navegador. Lo
+/// que sí se puede es decirle al gestor de contraseñas de qué va el campo, que
+/// es lo que hace esto. Un enmascarado de verdad exigiría cambiar el elemento a
+/// `<input type="password">` al vuelo, y eso vacía el estado del IME a mitad de
+/// escritura.
+fn web_autocomplete(c: TextInputContentType, is_secure: bool) -> &'static str {
+    match c {
+        TextInputContentType::Username => "username",
+        TextInputContentType::Password => "current-password",
+        TextInputContentType::NewPassword => "new-password",
+        TextInputContentType::EmailAddress => "email",
+        TextInputContentType::Url => "url",
+        TextInputContentType::FullStreetAddress => "street-address",
+        TextInputContentType::TelephoneNumber => "tel",
+        TextInputContentType::OneTimeCode => "one-time-code",
+        TextInputContentType::None => {
+            if is_secure {
+                "current-password"
+            } else {
+                "off"
+            }
+        }
+    }
+}
