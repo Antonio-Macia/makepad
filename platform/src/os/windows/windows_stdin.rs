@@ -135,6 +135,11 @@ impl Cx {
         Self::stdin_send_to_host(AppToStudio::AfterStartup);
         // What this child's pointer input understands (see HostedPointerCaps).
         Self::stdin_send_to_host(AppToStudio::Custom(crate::ime::HostedPointerCaps::current().to_json()));
+        // Nothing below turns a dirty tree into a frame except the Tick
+        // branch, so a host that never ticks fails in total silence. The
+        // watchdog is the only thing that can notice, because with no ticks
+        // this loop is parked waiting and no code of ours runs.
+        crate::studio_tick_watchdog::start_studio_tick_watchdog();
 
         loop {
             if !Self::has_studio_web_socket() {
@@ -198,6 +203,7 @@ impl Cx {
                 WebSocketMessage::Closed => break,
                 WebSocketMessage::Opened => {}
             }
+            crate::studio_tick_watchdog::note_studio_draw_pending(self.need_redrawing());
             self.run_live_edit_if_needed("windows-stdin");
         }
     }
@@ -312,6 +318,7 @@ impl Cx {
             }
             StudioToApp::RunViewFrameRequest(_) => {}
             StudioToApp::Tick => {
+                crate::studio_tick_watchdog::note_studio_tick();
                 let internal_signal = SignalToUI::check_and_clear_internal_signal();
                 let ui_signal = SignalToUI::check_and_clear_ui_signal();
                 if internal_signal || ui_signal {
@@ -344,6 +351,7 @@ impl Cx {
                 self.hlsl_adopt_shaders(d3d11_cx);
                 if self.need_redrawing() {
                     self.call_draw_event(time_now);
+                    crate::studio_tick_watchdog::note_studio_drew();
                     self.hlsl_compile_shaders(d3d11_cx);
                 }
 

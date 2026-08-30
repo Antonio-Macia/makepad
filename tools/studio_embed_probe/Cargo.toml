@@ -1,0 +1,9 @@
+[package]
+name = "makepad-studio-embed-probe"
+version = "1.0.0"
+edition = "2021"
+description = "Tiny embedded (studio/stdin-loop) app that reports every draw, so a host can be measured from outside"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0" }

@@ -156,6 +156,11 @@ impl Cx {
         Self::stdin_send_to_host(AppToStudio::AfterStartup);
         // What this child's pointer input understands (see HostedPointerCaps).
         Self::stdin_send_to_host(AppToStudio::Custom(crate::ime::HostedPointerCaps::current().to_json()));
+        // Nothing below turns a dirty tree into a frame except the Tick
+        // branch, so a host that never ticks fails in total silence. The
+        // watchdog is the only thing that can notice, because with no ticks
+        // this loop is parked waiting and no code of ours runs.
+        crate::studio_tick_watchdog::start_studio_tick_watchdog();
 
         let mut last_recv: Option<std::time::Instant> = None;
         loop {
@@ -241,6 +246,7 @@ impl Cx {
                 WebSocketMessage::Closed => break,
                 WebSocketMessage::Opened => {}
             }
+            crate::studio_tick_watchdog::note_studio_draw_pending(self.need_redrawing());
             self.run_live_edit_if_needed("macos-stdin");
         }
     }
@@ -348,6 +354,7 @@ impl Cx {
             }
             StudioToApp::RunViewFrameRequest(_) => {}
             StudioToApp::Tick => {
+                crate::studio_tick_watchdog::note_studio_tick();
                 for stdin_window in stdin_windows.iter_mut() {
                     if let Some(swapchain) = stdin_window.swapchain.as_mut() {
                         let [presentable_image] = &mut swapchain.presentable_images;
@@ -402,6 +409,7 @@ impl Cx {
                 if drew {
                     let t0 = std::time::Instant::now();
                     self.call_draw_event(time_now);
+                    crate::studio_tick_watchdog::note_studio_drew();
                     self.mtl_compile_shaders(metal_cx);
                     stdin_trace(&format!("draw {:.1}", t0.elapsed().as_secs_f64() * 1000.0));
                 }

@@ -190,11 +190,13 @@ impl Cx {
         self.run_live_edit_if_needed("gpusim");
         if self.os.no_draw {
             self.call_draw_event(time_now);
+            crate::studio_tick_watchdog::note_studio_drew();
             self.os.no_draw_initialized = true;
             return false;
         }
         self.call_draw_event(time_now);
         self.gpusim_compile_shaders();
+        crate::studio_tick_watchdog::note_studio_drew();
         if send_protocol && self.screenshot_requests.is_empty() {
             self.gpusim_render_all_passes(time_now);
             true
@@ -239,6 +241,11 @@ impl Cx {
         }
         write_stdout_msg(&AppToStudio::AfterStartup);
         write_stdout_msg(&AppToStudio::Custom(crate::ime::HostedPointerCaps::current().to_json()));
+        // Nothing below turns a dirty tree into a frame except the Tick
+        // branch, so a host that never ticks fails in total silence. The
+        // watchdog is the only thing that can notice, because with no ticks
+        // this loop is parked waiting and no code of ours runs.
+        crate::studio_tick_watchdog::start_studio_tick_watchdog();
 
         'host: while running {
             let first = match json_msg_rx.recv() {
@@ -441,6 +448,7 @@ impl Cx {
                 }
                 StudioToApp::RunViewFrameRequest(_) => {}
                 StudioToApp::Tick => {
+                    crate::studio_tick_watchdog::note_studio_tick();
                     let internal_signal = SignalToUI::check_and_clear_internal_signal();
                     let ui_signal = SignalToUI::check_and_clear_ui_signal();
                     if internal_signal || ui_signal {
@@ -523,6 +531,7 @@ impl Cx {
                 }
             }
             }
+            crate::studio_tick_watchdog::note_studio_draw_pending(self.need_redrawing());
         }
     }
 

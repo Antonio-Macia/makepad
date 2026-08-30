@@ -750,6 +750,11 @@ impl Cx {
         #[cfg(all(use_vulkan, linux_direct))]
         self.stdin_gpu_hello();
         self.stdin_handle_platform_ops(&mut stdin_windows);
+        // Nothing below turns a dirty tree into a frame except the Tick
+        // branch, so a host that never ticks fails in total silence. The
+        // watchdog is the only thing that can notice, because with no ticks
+        // this loop is parked in recv and no code of ours runs.
+        crate::studio_tick_watchdog::start_studio_tick_watchdog();
 
         #[cfg(all(use_vulkan, linux_direct))]
         self.stdin_gpu_event_loop(&mut stdin_windows);
@@ -815,6 +820,7 @@ impl Cx {
                 WebSocketMessage::Opened => {}
             }
             self.run_live_edit_if_needed("linux-stdin");
+            crate::studio_tick_watchdog::note_studio_draw_pending(self.need_redrawing());
         }
         #[cfg(all(use_vulkan, linux_direct))]
         self.os.gpu_inbox.take();
@@ -1059,6 +1065,7 @@ impl Cx {
             }
             StudioToApp::RunViewFrameRequest(_) => {}
             StudioToApp::Tick => {
+                crate::studio_tick_watchdog::note_studio_tick();
                 let internal_signal = SignalToUI::check_and_clear_internal_signal();
                 let ui_signal = SignalToUI::check_and_clear_ui_signal();
                 if internal_signal || ui_signal {
@@ -1115,6 +1122,7 @@ impl Cx {
                     if self.os.opengl_cx.is_some() {
                         self.opengl_compile_shaders();
                     }
+                    crate::studio_tick_watchdog::note_studio_drew();
                 }
 
                 self.stdin_handle_repaint(stdin_windows);
