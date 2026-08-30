@@ -27,6 +27,26 @@
 //! nosotros. Es el único oráculo que no comparte premisa con el código que se
 //! está probando.
 //!
+//! 🔴 **Y antes de creerse un `false`, hay que hacer el CONTROL**: el mismo
+//! `adb shell input tap` sobre un `<input>` HTML nativo tiene que levantar el
+//! teclado. Sin eso, un `false` no distingue «el arreglo no funciona» de «así de
+//! tocar no vale» — y las dos cosas se ven igual.
+//!
+//! ⚠ Dos trampas más, las dos medidas el 2026-08-30:
+//!
+//! - **Chrome congela las pestañas de fondo.** Al abrir una segunda pestaña, la
+//!   primera deja de contestar al protocolo DevTools, y eso se lee igual que
+//!   «la página se ha colgado». Se mide sobre la que está delante.
+//! - **El primer toque después de cargar puede perderse**, mientras la escena
+//!   se asienta. Si el primero no hace nada, repetir antes de concluir.
+//!
+//! ## Verificado
+//!
+//! - **S9+** (SM-G965F): teclado arriba, tecla de BUSCAR, texto recibido, se
+//!   baja con atrás y no rebota, y vuelve a subir al tocar. Tres ciclos.
+//! - **Poco F7 Pro** (24117RK2CG, Chrome 151): igual, y con el autocompletado
+//!   del sistema encima.
+//!
 //! Y en el navegador, la mitad que explica el porqué:
 //!
 //! ```js
