@@ -165,6 +165,7 @@ impl Cx {
                 live_id!(ToWasmAnimationFrame) => {
                     let tw = ToWasmAnimationFrame::read_to_wasm(&mut to_wasm);
                     is_animation_frame = Some(tw.time);
+                    self.os.ultimo_fotograma_s = tw.time;
                     if self.new_next_frames.len() != 0 {
                         self.call_next_frame_event(tw.time);
                     }
@@ -1079,8 +1080,20 @@ impl CxOsApi for Cx {
             .append_from_wasm_js(&[FromWasmCreateThread::to_js_code()]);
     }
 
+    /// Segundos desde que arrancó la aplicación.
+    ///
+    /// 🔴 Esto devolvía **0.0 constante**, que no es «no disponible»: es una
+    /// mentira que compila, no avisa, y hace que cualquier medida de tiempo en
+    /// web salga cero. Quien mida un intervalo con esto obtiene 0 ms y concluye
+    /// que su código es instantáneo.
+    ///
+    /// Ahora devuelve el instante del último fotograma, que es el que manda el
+    /// `requestAnimationFrame` del navegador. ⚠ Tiene resolución **de
+    /// fotograma**: sirve para animar y para saber cuánto lleva algo, y NO para
+    /// cronometrar dentro de un mismo fotograma —ahí devuelve el mismo valor
+    /// dos veces—.
     fn seconds_since_app_start(&self) -> f64 {
-        0.0
+        self.os.ultimo_fotograma_s
     }
 
     #[cfg(target_feature = "atomics")]
@@ -1236,6 +1249,12 @@ pub struct CxOs {
     /// `inputmode` de un campo enfocado es justo lo que puede hacer que un
     /// teclado se cierre y se vuelva a abrir.
     pub(crate) ultimo_ime: Option<(f64, f64, TextInputConfig)>,
+
+    /// Instante del último `requestAnimationFrame`, en segundos.
+    ///
+    /// Es lo único parecido a un reloj que tiene el backend de web: `Instant`
+    /// de `std` **aborta** en `wasm32-unknown-unknown`.
+    pub(crate) ultimo_fotograma_s: f64,
 }
 
 impl Default for CxOs {
@@ -1254,6 +1273,7 @@ impl Default for CxOs {
 
             media: CxWebMedia::default(),
             ultimo_ime: None,
+            ultimo_fotograma_s: 0.0,
         }
     }
 }
