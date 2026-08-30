@@ -499,6 +499,26 @@ export class WasmBridge {
         })
     }
 
+    // 🔴 Siempre revalidando: sin esto, un navegador sirve el `.wasm` DE AYER.
+    //
+    // El fichero se llama igual en cada publicacion, asi que el navegador lo da
+    // por bueno del cache: el HTML se recarga, el programa es el anterior, y no
+    // hay ningun error en ninguna capa. En un escritorio no se ve, porque uno
+    // recarga con Ctrl+Shift+R sin pensarlo; en un movil no hay forma comoda de
+    // hacer eso, y lo que se ve es que un arreglo «no funciona» cuando lo que
+    // se esta ejecutando es la version de antes.
+    //
+    // Lo reporto ORBITA el 2026-08-30, despues de perder una verificacion
+    // entera probando un arreglo con el wasm viejo dentro (6 MB, mismo nombre).
+    //
+    // `cache: 'no-cache'` NO es `no-store`: el navegador sigue guardandolo y
+    // pregunta al servidor si cambio. Si no cambio contesta 304 y no se
+    // descargan los megas otra vez; si cambio, llega el nuevo. O sea que cuesta
+    // una peticion condicional y a cambio quita una clase entera de fallo mudo.
+    static _sin_cache(url) {
+        return fetch(url, { cache: 'no-cache' });
+    }
+
     static fetch_and_instantiate_wasm(wasm_url, memory, split_config) {
         const has_split_data = split_config && split_config.split_data_url;
         const has_secondary = split_config && split_config.secondary_wasm_url;
@@ -506,12 +526,12 @@ export class WasmBridge {
 
         if (has_split_data || has_secondary) {
             return (async () => {
-                const wasm_response_promise = fetch(wasm_url);
+                const wasm_response_promise = this._sin_cache(wasm_url);
                 const split_response_promise = has_split_data
-                    ? fetch(split_config.split_data_url)
+                    ? this._sin_cache(split_config.split_data_url)
                     : null;
                 const secondary_response_promise = has_secondary
-                    ? fetch(split_config.secondary_wasm_url)
+                    ? this._sin_cache(split_config.secondary_wasm_url)
                     : null;
 
                 const wasm_response = await wasm_response_promise;
@@ -528,7 +548,7 @@ export class WasmBridge {
                 console.error(error);
             });
         }
-        return WebAssembly.compileStreaming(fetch(wasm_url))
+        return WebAssembly.compileStreaming(this._sin_cache(wasm_url))
             .then(
                 (module) => this.instantiate_wasm(module, memory, { _post_signal: _ => { } }),
                 error => {
