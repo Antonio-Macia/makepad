@@ -1,0 +1,15 @@
+[package]
+name = "makepad-sonda-teclado-movil"
+version = "1.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "makepad-sonda-teclado-movil"
+path = "src/main.rs"
