@@ -116,6 +116,11 @@ impl Cx {
         self.set_physical_keyboard_state(true);
         self.call_event_handler(&Event::Startup);
         Self::stdin_send_to_host(AppToStudio::AfterStartup);
+        // Nothing below turns a dirty tree into a frame except the Tick
+        // branch, so a host that never ticks fails in total silence. The
+        // watchdog is the only thing that can notice, because with no ticks
+        // this loop is parked waiting and no code of ours runs.
+        crate::studio_tick_watchdog::start_studio_tick_watchdog();
 
         loop {
             if !Self::has_studio_web_socket() {
@@ -170,6 +175,7 @@ impl Cx {
                 WebSocketMessage::Closed => break,
                 WebSocketMessage::Opened => {}
             }
+            crate::studio_tick_watchdog::note_studio_draw_pending(self.need_redrawing());
             self.run_live_edit_if_needed("windows-stdin");
         }
     }
@@ -287,6 +293,7 @@ impl Cx {
             }
             StudioToApp::RunViewFrameRequest(_) => {}
             StudioToApp::Tick => {
+                crate::studio_tick_watchdog::note_studio_tick();
                 if SignalToUI::check_and_clear_ui_signal() {
                     self.handle_termination_signal();
                     self.handle_media_signals();
@@ -314,6 +321,7 @@ impl Cx {
 
                 if self.need_redrawing() {
                     self.call_draw_event(time_now);
+                    crate::studio_tick_watchdog::note_studio_drew();
                     self.hlsl_compile_shaders(d3d11_cx);
                 }
 

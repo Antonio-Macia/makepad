@@ -65,6 +65,11 @@ workspace.members = [
     "tools/map_bake",
     "tools/remote",
     "tools/arcade_eval",
+    # Embedding harness: a minimal studio host + a probe app, used to measure
+    # whether an embedded (--stdin-loop) app ever gets a frame. See
+    # tools/studio_embed_host/src/main.rs.
+    "tools/studio_embed_host",
+    "tools/studio_embed_probe",
     # === tests ===
     "platform/script/test",
 ]
