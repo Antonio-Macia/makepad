@@ -39,6 +39,29 @@ pub(crate) struct StdinWindow {
     swapchain: Option<LocalSwapchain>,
     present_index: usize,
     new_frame_being_rendered: Option<PresentableDraw>,
+    /// Cuántas imágenes del swapchain quedan por estrenar.
+    ///
+    /// 🔴 **Una interfaz QUIETA deja imágenes sin pintar, y el anfitrión enseña
+    /// una de ésas.** El swapchain tiene varias imágenes (2 en Windows, 3 en
+    /// Linux) y cada dibujado pinta UNA, rotando. Una app que se dibuja una vez
+    /// y ya —que es lo normal: un árbol de widgets estático no pide más
+    /// fotogramas— pinta la primera y deja la segunda como se asignó. En cuanto
+    /// el anfitrión presenta esa segunda, se ve **en blanco**.
+    ///
+    /// Lo midió PULSO el 30-08-2026, y su medida es la que lo señala: 13.637
+    /// `Tick` enviados, **un** `DrawCompleteAndFlip` y luego 213 s de silencio,
+    /// con la pantalla **BLANCA y no negra**. Blanco es una imagen que existe y
+    /// nadie pintó; negro sería no tener swapchain.
+    ///
+    /// Y explica lo que a ellos les despistaba: la versión anterior de su app
+    /// —un contador que llamaba a `render()` en cada fotograma— **sí pintaba**,
+    /// porque al redibujar sin parar estrenaba todas las imágenes. La diferencia
+    /// no era el transporte ni el reloj: era que aquélla no paraba de dibujar.
+    ///
+    /// Con esto, al llegar un swapchain se fuerzan tantos dibujados como
+    /// imágenes tenga, y todas quedan estrenadas antes de que la interfaz se
+    /// quede quieta.
+    imagenes_por_estrenar: usize,
 }
 
 impl Cx {
@@ -287,6 +310,9 @@ impl Cx {
                 let stdin_window = &mut stdin_windows[window_id];
                 stdin_window.swapchain = Some(local_swapchain);
                 stdin_window.present_index = 0;
+                // Todas las imágenes están sin estrenar: hay que pintarlas
+                // todas, no sólo la primera. Ver `imagenes_por_estrenar`.
+                stdin_window.imagenes_por_estrenar = SWAPCHAIN_IMAGE_COUNT;
 
                 self.redraw_all();
                 self.stdin_handle_platform_ops(stdin_windows);
@@ -317,6 +343,28 @@ impl Cx {
                 let time_now = self.seconds_since_app_start();
                 if !self.new_next_frames.is_empty() {
                     self.call_next_frame_event(time_now);
+                }
+
+                // 🔴 Estrenar las imágenes del swapchain que quedan.
+                //
+                // `need_redrawing()` dice la verdad —un árbol quieto no necesita
+                // otro fotograma— pero cada dibujado pinta UNA imagen de las
+                // varias que tiene el swapchain, rotando. Si la interfaz se
+                // queda quieta tras el primero, las demás no se estrenan nunca y
+                // el anfitrión enseña una en blanco. Ver `imagenes_por_estrenar`.
+                //
+                // Se fuerza el redibujado ANTES de preguntar, para que el
+                // dibujado de abajo sea el de siempre y no haya dos caminos.
+                if stdin_windows
+                    .iter()
+                    .any(|w| w.imagenes_por_estrenar > 0 && w.swapchain.is_some())
+                {
+                    for w in stdin_windows.iter_mut() {
+                        if w.imagenes_por_estrenar > 0 {
+                            w.imagenes_por_estrenar -= 1;
+                        }
+                    }
+                    self.redraw_all();
                 }
 
                 if self.need_redrawing() {
