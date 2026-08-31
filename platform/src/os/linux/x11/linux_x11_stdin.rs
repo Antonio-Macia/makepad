@@ -20,7 +20,9 @@ use crate::gl_sys;
 // compiles this file without it.
 #[cfg(not(all(use_vulkan, linux_direct)))]
 use crate::{os::shared_framebuf::LinuxSharedSoftwareBuffer, texture::TextureSize};
-use makepad_studio_protocol::{AppToStudio, GCSample, StudioToApp, StudioToAppVec};
+use makepad_studio_protocol::{
+    AppToStudio, GCSample, StudioToApp, StudioToAppVec, SWAPCHAIN_IMAGE_COUNT,
+};
 #[cfg(not(all(use_vulkan, linux_direct)))]
 use crate::os::shared_framebuf::shared_presentable_image_recv_fds_from_aux_chan;
 
@@ -43,6 +45,17 @@ pub(crate) struct StdinWindow {
     /// The OpenGL software-fallback readback target; unused under Vulkan.
     readback_framebuffer: Option<u32>,
     last_trace_draw: Option<(u32, u32, u32, u32, u64)>,
+    /// Cuántas imágenes del swapchain quedan por estrenar.
+    ///
+    /// 🔴 Una interfaz QUIETA deja imágenes sin pintar y el anfitrión enseña una
+    /// de ésas, en blanco. Cada dibujado pinta UNA de las varias imágenes,
+    /// rotando; un árbol de widgets estático se dibuja una vez y ya. Aquí son
+    /// **tres**, así que el problema es peor que en Windows, donde son dos.
+    ///
+    /// Lo midió PULSO el 30-08-2026 en Windows: 13.637 `Tick`, UN
+    /// `DrawCompleteAndFlip` y 213 s de silencio, con la pantalla blanca. Ver el
+    /// comentario largo en `windows_stdin.rs`.
+    imagenes_por_estrenar: usize,
 }
 
 #[cfg(all(use_vulkan, linux_direct))]
@@ -1046,6 +1059,9 @@ impl Cx {
                 let stdin_window = &mut stdin_windows[window_id];
                 stdin_window.swapchain = Some(new_swapchain);
                 stdin_window.present_index = 0;
+                // Todas sin estrenar: hay que pintarlas todas, no sólo la
+                // primera. Ver `imagenes_por_estrenar`.
+                stdin_window.imagenes_por_estrenar = SWAPCHAIN_IMAGE_COUNT;
 
                 let window = &mut self.windows[CxWindowPool::from_usize(window_id)];
                 let pass = &mut self.passes[window.main_pass_id.unwrap()];
@@ -1113,6 +1129,19 @@ impl Cx {
                 }
                 if !self.new_next_frames.is_empty() {
                     self.call_next_frame_event(time_now);
+                }
+
+                // Estrenar las imágenes que queden: ver `imagenes_por_estrenar`.
+                if stdin_windows
+                    .iter()
+                    .any(|w| w.imagenes_por_estrenar > 0 && w.swapchain.is_some())
+                {
+                    for w in stdin_windows.iter_mut() {
+                        if w.imagenes_por_estrenar > 0 {
+                            w.imagenes_por_estrenar -= 1;
+                        }
+                    }
+                    self.redraw_all();
                 }
 
                 if self.need_redrawing() {
