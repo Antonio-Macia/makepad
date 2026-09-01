@@ -481,6 +481,27 @@ impl Cx {
                     alloc_height,
                     presentable_images,
                 };
+                // 🔴 El vector de ventanas se hace crecer AQUÍ si hace falta.
+                //
+                // Antes esto era `&mut stdin_windows[window_id]` a secas, y
+                // `stdin_windows` sólo crece cuando la app crea su ventana (en
+                // `stdin_handle_platform_ops`). O sea que un anfitrión que mande
+                // el swapchain **antes** de que el hijo haya creado la ventana
+                // —cosa que no controla el hijo: es otro proceso y no hay orden
+                // garantizado— reventaba el hijo con un «index out of bounds»
+                // que no nombra ni el swapchain ni la ventana.
+                //
+                // Y el daño no acaba ahí: el hijo muere, el anfitrión reintenta
+                // el arranque, y lo que se ve desde fuera es «tarda en arrancar»
+                // en vez de «se ha caído». PULSO midió 4,5 s y cuatro reintentos
+                // hasta el primer fotograma el 31-08-2026.
+                //
+                // Crecer es lo correcto y no perder el swapchain: cuando el hijo
+                // cree la ventana, `stdin_handle_platform_ops` sólo añade huecos
+                // mientras `id >= len`, así que respeta el que ya está puesto.
+                while window_id >= stdin_windows.len() {
+                    stdin_windows.push(StdinWindow::default());
+                }
                 let stdin_window = &mut stdin_windows[window_id];
                 stdin_window.swapchain = Some(new_swapchain);
                 stdin_window.present_index = 0;
