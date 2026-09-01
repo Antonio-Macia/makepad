@@ -954,6 +954,30 @@ impl TokenParser {
                     tb.ident_with_span(&ty, span);
                 }
             }
+            // A type may be a PATH, not just one identifier.
+            //
+            // Without this loop, `#[rust] campo: a::b::C` fails: `a` is eaten as
+            // the whole type, the field parser then expects a `,` and finds
+            // `::`, and the caller reports "Unexpected field form". The message
+            // names neither the field nor the path, and points at the whole
+            // `#[derive(...)]` — so in a struct with forty fields the only way
+            // to find it is to bisect. Reported by hc2-admin on 2026-09-01,
+            // after losing a while to it.
+            //
+            // Note the failure was NOT limited to three segments: any `::` in a
+            // top-level field type failed. It looked like "three is too many"
+            // because paths inside generics (`Vec<a::B>`) go through
+            // `eat_generic`, which copies the tokens verbatim and never cared.
+            while self.eat_sep() {
+                tb.add("::");
+                match self.eat_any_ident_with_span() {
+                    Some((seg, span)) => {
+                        tb.ident_with_span(&seg, span);
+                    }
+                    // `a::` with nothing after it is not a type.
+                    None => return None,
+                }
+            }
             tb.stream(self.eat_generic());
             return Some(tb.end());
         }
