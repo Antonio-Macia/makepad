@@ -824,6 +824,56 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             })?;
         }
     }
+
+    // ── Los .js QUE APORTA LA APP ────────────────────────────────────────────
+    //
+    // 🔴 La misma puerta que `java_dirs` en Android, y por el mismo motivo
+    // (2026-09-05). Hasta ahora la lista de ficheros JS estaba escrita a mano
+    // aquí arriba, sin forma de que una app aportara el suyo. Y en el navegador
+    // hay APIs que **sólo** se alcanzan desde JS —notificaciones, WebAuthn, el
+    // portapapeles asíncrono, Web Share—: sin esto, cada una obliga a parchear
+    // makepad, igual que en Android obligaba una clase Java.
+    //
+    //     [package.metadata.makepad.web]
+    //     js_dirs = ["js"]
+    //
+    // Los ficheros van a `app_dir/app_js/`, para que se vea de dónde salen y no
+    // se mezclen con los de la plataforma.
+    if let Ok(crate_dir) = crate::utils::get_crate_dir(build_crate) {
+        for dir in read_web_js_dirs(build_crate) {
+            let abs = crate_dir.join(&dir);
+            let entries = std::fs::read_dir(&abs).map_err(|e| {
+                // Se rompe en vez de avisar: un JS declarado y ausente no falla
+                // al construir, falla en el navegador del usuario.
+                format!(
+                    "[package.metadata.makepad.web].js_dirs apunta a {abs:?}, que no se puede \
+                     leer: {e}. Si la carpeta ya no existe, quita la entrada."
+                )
+            })?;
+            let mut encontrados = 0usize;
+            for e in entries.flatten() {
+                let ruta = e.path();
+                if ruta.extension().and_then(|x| x.to_str()) == Some("js") {
+                    let nombre = ruta.file_name().unwrap().to_string_lossy().to_string();
+                    cp_brotli(
+                        &ruta,
+                        &app_dir.join("app_js").join(&nombre),
+                        false,
+                        config.brotli,
+                    )?;
+                    encontrados += 1;
+                }
+            }
+            if encontrados == 0 {
+                return Err(format!(
+                    "[package.metadata.makepad.web].js_dirs declara {abs:?} y ahí no hay ni un \
+                     `.js`. Es casi siempre una ruta mal escrita."
+                ));
+            }
+            println!("JS de la app: {encontrados} fichero(s) en {}", abs.display());
+        }
+    }
+
     let wasm_source = if config.bindgen {
         shell(
             build_dir.as_path(),

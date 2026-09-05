@@ -1123,6 +1123,8 @@ fn compile_java(
     sdk_dir: &Path,
     build_paths: &BuildPaths,
     urls: &AndroidSDKUrls,
+    // Nombre de la crate que se construye, para leer sus `java_dirs`.
+    build_crate: &str,
 ) -> Result<(), String> {
     let makepad_package_path = "dev/makepad/android";
     let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1154,6 +1156,55 @@ fn compile_java(
         build_paths.java_file.clone(),
         build_paths.xr_file.clone(),
     ];
+    let mut java_sources = java_sources;
+
+    // ── Las fuentes .java QUE APORTA LA APP ──────────────────────────────────
+    //
+    // 🔴 Sin esto, la lista de arriba es todo lo que puede haber en el APK, y
+    // cualquier API de Android que exija heredar de una clase abstracta
+    // —`BiometricPrompt.AuthenticationCallback`, `BroadcastReceiver`,
+    // `Service`— obliga a parchear makepad, porque desde JNI NO SE PUEDE CREAR
+    // UNA CLASE. Declarándolas en el Cargo.toml de la app:
+    //
+    //     [package.metadata.makepad.android]
+    //     java_dirs = ["java"]
+    //
+    // Las rutas son relativas al Cargo.toml de la app. Se recogen los `.java`
+    // de cada carpeta, sin recursión — una carpeta con subcarpetas es un
+    // paquete Java distinto y merece su propia entrada, explícita.
+    if let Ok(crate_dir) = crate::utils::get_crate_dir(build_crate) {
+        let metadata = crate::utils::read_android_package_metadata(build_crate);
+        for dir in &metadata.java_dirs {
+            let abs = crate_dir.join(dir);
+            let entries = std::fs::read_dir(&abs).map_err(|e| {
+                // ⚠ Se ROMPE en vez de avisar y seguir. Una carpeta declarada y
+                // ausente significa que las clases que la app necesita NO van a
+                // estar en el APK, y eso no falla al compilar: falla en el
+                // teléfono con un `ClassNotFoundException` y a un usuario.
+                format!(
+                    "[package.metadata.makepad.android].java_dirs apunta a {abs:?}, que no se \
+                     puede leer: {e}. Si la carpeta ya no existe, quita la entrada; dejarla \
+                     puesta hace que las clases falten en el APK sin que nada lo diga aquí."
+                )
+            })?;
+            let mut encontrados = 0usize;
+            for e in entries.flatten() {
+                let ruta = e.path();
+                if ruta.extension().and_then(|x| x.to_str()) == Some("java") {
+                    java_sources.push(ruta);
+                    encontrados += 1;
+                }
+            }
+            if encontrados == 0 {
+                return Err(format!(
+                    "[package.metadata.makepad.android].java_dirs declara {abs:?} y ahí no hay \
+                     ni un `.java`. Es casi siempre una ruta mal escrita, y el sintoma sería un \
+                     `ClassNotFoundException` en el teléfono."
+                ));
+            }
+            println!("Java de la app: {encontrados} fichero(s) en {}", abs.display());
+        }
+    }
 
     let mut hasher = DefaultHasher::new();
     for source in &java_sources {
@@ -2738,7 +2789,7 @@ pub fn build_aab(
     // Reuse the existing R-class / javac / d8 pipeline; outputs `classes.dex`
     // into `build_paths.out_dir`.
     build_r_class(sdk_dir, &build_paths, urls)?;
-    compile_java(sdk_dir, &build_paths, urls)?;
+    compile_java(sdk_dir, &build_paths, urls, build_crate)?;
     build_dex(sdk_dir, &build_paths, urls)?;
     let classes_dex = build_paths.out_dir.join("classes.dex");
     if !classes_dex.is_file() {
@@ -2900,7 +2951,7 @@ pub fn build(
         debuggable
     );
     build_r_class(sdk_dir, &build_paths, urls)?;
-    compile_java(sdk_dir, &build_paths, urls)?;
+    compile_java(sdk_dir, &build_paths, urls, build_crate)?;
     build_dex(sdk_dir, &build_paths, urls)?;
     build_unaligned_apk(sdk_dir, &build_paths, urls)?;
     let build_dir = add_rust_library(

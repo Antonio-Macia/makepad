@@ -305,6 +305,21 @@ pub struct AndroidPackageMetadata {
     /// app that genuinely needs MIDI, where API 29's libamidi.so must be
     /// guaranteed-present rather than runtime-loaded).
     pub min_sdk_version: Option<usize>,
+    /// `[package.metadata.makepad.android].java_dirs` — carpetas con fuentes
+    /// `.java` PROPIAS de la app, que se compilan junto a las de makepad.
+    ///
+    /// 🔴 **Por qué existe (2026-09-05).** Hasta ahora la lista de `.java` del
+    /// APK estaba escrita a mano en `compile.rs`, sin ninguna forma de que una
+    /// app aportara la suya. Y eso no es un detalle de comodidad: hay APIs de
+    /// Android que **sólo** se pueden usar con una clase Java propia, porque
+    /// exigen heredar de una clase abstracta —`BiometricPrompt.
+    /// AuthenticationCallback`, `BroadcastReceiver`, `Service`— y desde JNI
+    /// **no se puede crear una clase**. Sin esto, cada una de esas capacidades
+    /// obliga a parchear makepad.
+    ///
+    /// Las rutas son relativas al `Cargo.toml` de la app. Se recogen todos los
+    /// `.java` de cada carpeta, sin recursión.
+    pub java_dirs: Vec<String>,
 }
 
 pub fn read_android_package_metadata(build_crate: &str) -> AndroidPackageMetadata {
@@ -344,6 +359,16 @@ pub fn read_android_package_metadata(build_crate: &str) -> AndroidPackageMetadat
     if let Some(Toml::Str(v, _)) = toml.get("package.metadata.makepad.android.version_name") {
         out.version_name_override = Some(v.clone());
     }
+    if let Some(Toml::Array(items)) = toml.get("package.metadata.makepad.android.java_dirs") {
+        for item in items {
+            match item {
+                Toml::Str(v, _) => out.java_dirs.push(v.clone()),
+                other => eprintln!(
+                    "warning: ignoring [package.metadata.makepad.android].java_dirs entry {other:?}; expected a string path"
+                ),
+            }
+        }
+    }
     if let Some(Toml::Num(n, _)) = toml.get("package.metadata.makepad.android.min_sdk_version") {
         if *n >= 1.0 && *n <= 100.0 && n.fract() == 0.0 {
             out.min_sdk_version = Some(*n as usize);
@@ -351,6 +376,37 @@ pub fn read_android_package_metadata(build_crate: &str) -> AndroidPackageMetadat
             eprintln!(
                 "warning: ignoring [package.metadata.makepad.android].min_sdk_version = {n}; expected a positive integer API level"
             );
+        }
+    }
+    out
+}
+
+/// `[package.metadata.makepad.web].js_dirs` — carpetas con `.js` propios de la
+/// app, que se copian al paquete web junto a los de la plataforma.
+///
+/// 🔴 Es la hermana de `java_dirs` y existe por el mismo motivo: en el
+/// navegador hay APIs que **sólo** se alcanzan desde JS (notificaciones,
+/// WebAuthn, portapapeles asíncrono, Web Share), y sin este punto de extensión
+/// cada una obliga a parchear makepad.
+pub fn read_web_js_dirs(build_crate: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(crate_dir) = get_crate_dir(build_crate) else {
+        return out;
+    };
+    let Ok(cargo_toml) = std::fs::read_to_string(crate_dir.join("Cargo.toml")) else {
+        return out;
+    };
+    let Ok(toml) = parse_toml(&cargo_toml) else {
+        return out;
+    };
+    if let Some(Toml::Array(items)) = toml.get("package.metadata.makepad.web.js_dirs") {
+        for item in items {
+            match item {
+                Toml::Str(v, _) => out.push(v.clone()),
+                other => eprintln!(
+                    "warning: ignoring [package.metadata.makepad.web].js_dirs entry {other:?}; expected a string path"
+                ),
+            }
         }
     }
     out
