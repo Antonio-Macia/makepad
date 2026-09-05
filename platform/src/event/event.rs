@@ -27,6 +27,18 @@ use {
     },
 };
 
+/// Result of `Activity.startActivityForResult` on Android.
+///
+/// Arrives as `Event::ActivityResult`. `result_code` is `Activity.RESULT_OK`
+/// (-1) or `RESULT_CANCELED` (0); `data_uri` is `Intent.getDataString()`, or
+/// empty when the Intent carried no data.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActivityResult {
+    pub request_code: i32,
+    pub result_code: i32,
+    pub data_uri: String,
+}
+
 /// Events that can be sent between the Makepad framework and the application.
 #[derive(Debug)]
 pub enum Event {
@@ -236,6 +248,8 @@ pub enum Event {
     MidiPorts(MidiPortsEvent),
     VideoInputs(VideoInputsEvent),
     NetworkResponses(NetworkResponsesEvent),
+    /// Resultado de un `startActivityForResult` en Android.
+    ActivityResult(ActivityResult),
 
     VideoPlaybackPrepared(VideoPlaybackPreparedEvent),
     VideoTextureUpdated(VideoTextureUpdatedEvent),
@@ -363,6 +377,7 @@ impl Event {
             66 => "ScriptReapply",
             69 => "LocationUpdate",
             70 => "LocationError",
+            71 => "ActivityResult",
             _ => panic!(),
         }
     }
@@ -453,6 +468,7 @@ impl Event {
             Self::XrLocal(_) => 57,
             Self::Custom(_) => 60,
             Self::ScriptReapply => 66,
+            Self::ActivityResult(_) => 71,
         }
     }
 

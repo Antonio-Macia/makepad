@@ -174,6 +174,15 @@ pub enum FromJavaMessage {
         request_id: i32,
         status: i32, // 0=NotDetermined, 1=Granted, 2=DeniedCanRetry, 3=DeniedPermanent
     },
+    ActivityResult {
+        request_code: i32,
+        result_code: i32,
+        /// `Intent.getDataString()`, o vacío si el Intent no traía datos. Se
+        /// pasa como texto y no como `jobject` a propósito: el Intent muere al
+        /// volver de `onActivityResult`, así que conservar el objeto obligaría a
+        /// una referencia global y a liberarla a mano desde el otro hilo.
+        data_uri: String,
+    },
     LocationUpdate {
         lon: f64,
         lat: f64,
@@ -1202,6 +1211,33 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onPermissionResu
         permission: jstring_to_string(env, permission),
         request_id: request_id as i32,
         status,
+    });
+}
+
+/// Resultado de `startActivityForResult`: selector de ficheros, cámara por
+/// intent, compartir, confirmar la credencial del sistema…
+///
+/// Hasta el 2026-09-05 `MakepadActivity.onActivityResult` estaba VACÍO, con un
+/// marcador de plantilla (`//% MAIN_ACTIVITY_ON_ACTIVITY_RESULT`) que no
+/// rellenaba nadie. O sea que `startActivityForResult` se podía llamar y su
+/// resultado no llegaba a ninguna parte — una promesa de la plataforma que no
+/// se podía cumplir, y sin ningún error que lo dijera.
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onActivityResult(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    request_code: jni_sys::jint,
+    result_code: jni_sys::jint,
+    data_uri: jni_sys::jstring,
+) {
+    send_from_java_message(FromJavaMessage::ActivityResult {
+        request_code: request_code as i32,
+        result_code: result_code as i32,
+        data_uri: if data_uri.is_null() {
+            String::new()
+        } else {
+            jstring_to_string(env, data_uri)
+        },
     });
 }
 

@@ -65,6 +65,7 @@ public class MakepadNative {
     
     // permissions
     public native static void onPermissionResult(String permission, int requestId, int status);
+    public native static void onActivityResult(int requestCode, int resultCode, String dataUri);
 
     // location
     public native static void onLocationUpdate(
