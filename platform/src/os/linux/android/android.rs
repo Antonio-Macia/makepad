@@ -1201,6 +1201,17 @@ impl Cx {
                     }
                 }
             }
+            FromJavaMessage::ActivityResult {
+                request_code,
+                result_code,
+                data_uri,
+            } => {
+                self.call_event_handler(&Event::ActivityResult(crate::event::ActivityResult {
+                    request_code,
+                    result_code,
+                    data_uri,
+                }));
+            }
             FromJavaMessage::LocationUpdate {
                 lon,
                 lat,

@@ -1642,6 +1642,15 @@ public class MakepadActivity
             handleFileDialogResult(requestCode, resultCode, data);
             return;
         }
+        super.onActivityResult(requestCode, resultCode, data);
+        // Se manda el URI como String y no el Intent: el objeto muere al volver
+        // de aqui, asi que pasarlo a Rust obligaria a una referencia global y a
+        // liberarla desde otro hilo.
+        String dataUri = null;
+        if (data != null) {
+            dataUri = data.getDataString();
+        }
+        MakepadNative.onActivityResult(requestCode, resultCode, dataUri);
         //% MAIN_ACTIVITY_ON_ACTIVITY_RESULT
     }
 
