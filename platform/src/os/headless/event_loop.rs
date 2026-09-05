@@ -225,6 +225,8 @@ impl Cx {
     ) -> bool {
         if self.os.no_draw {
             self.call_draw_event(time_now);
+        crate::studio_tick_watchdog::note_studio_drew();
+            crate::studio_tick_watchdog::note_studio_drew();
             self.os.no_draw_initialized = true;
             return false;
         }
@@ -293,6 +295,13 @@ impl Cx {
                 draw_ev_start.elapsed().as_secs_f64() * 1000.0
             );
         }
+        // Los dos lados de este conflicto eran COMPLEMENTARIOS, no alternativos
+        // (merge de f5fb4b79, 2026-09-05): arriba es el perfilado de ATLAS, y
+        // esta linea es el watchdog que trajo el arreglo de "una UI QUIETA dejaba
+        // imagenes del swapchain sin estrenar". Quedarse con uno solo perdia el
+        // otro en silencio: ni el perfilado ni el watchdog fallan al faltar, y
+        // por eso el error no habria tenido sintoma.
+        crate::studio_tick_watchdog::note_studio_drew();
         self.headless_compile_shaders();
         if send_protocol && self.screenshot_requests.is_empty() {
             self.headless_render_all_passes(time_now);
@@ -337,6 +346,11 @@ impl Cx {
             }
         }
         write_stdout_msg(&AppToStudio::AfterStartup);
+        // Nothing below turns a dirty tree into a frame except the Tick
+        // branch, so a host that never ticks fails in total silence. The
+        // watchdog is the only thing that can notice, because with no ticks
+        // this loop is parked waiting and no code of ours runs.
+        crate::studio_tick_watchdog::start_studio_tick_watchdog();
 
         while running {
             let msg = match json_msg_rx.recv() {
@@ -497,6 +511,7 @@ impl Cx {
                 }
                 StudioToApp::RunViewFrameRequest(_) => {}
                 StudioToApp::Tick => {
+                    crate::studio_tick_watchdog::note_studio_tick();
                     if SignalToUI::check_and_clear_ui_signal() {
                         self.handle_termination_signal();
                         self.handle_script_signals();
@@ -571,6 +586,7 @@ impl Cx {
                     }
                 }
             }
+            crate::studio_tick_watchdog::note_studio_draw_pending(self.need_redrawing());
         }
     }
 

@@ -2439,6 +2439,46 @@ impl Widget for TextInput {
                 self.last_sent_ime_text = self.text.clone();
                 self.last_sent_ime_sel_start = self.selection.start().index;
                 self.last_sent_ime_sel_end = self.selection.end().index;
+
+                // 🔴 PEDIR EL TECLADO AQUI, Y NO SOLO AL DIBUJAR.
+                //
+                // El dibujado tambien lo pide (`draw_walk`), y con eso basta en
+                // escritorio, en Android y en iOS. **En un navegador movil no.**
+                //
+                // Ahi el teclado en pantalla solo sube si el `focus()` del
+                // elemento oculto ocurre DENTRO del gesto del usuario. El pump
+                // del evento tactil es sincrono, asi que lo que se pida en esta
+                // rama llega al navegador dentro del `touchstart` que la
+                // provoco; el dibujado, en cambio, corre en el
+                // `requestAnimationFrame` siguiente —`call_draw_event` solo se
+                // llama con `is_animation_frame`—, o sea ya fuera del gesto, y
+                // entonces el navegador ignora el foco sin decir nada.
+                //
+                // Sintoma exacto que arregla, medido en ORBITAS: en un navegador
+                // de escritorio el teclado va; en el movil el campo se enfoca,
+                // el cursor parpadea, y **no se puede escribir** porque el
+                // teclado no sale. Ningun error, en ninguna capa.
+                //
+                // Es aditivo: la llamada del dibujado sigue estando y sigue
+                // afinando la posicion del cursor un fotograma despues. Lo que
+                // esta hace es llegar a tiempo.
+                if !self.is_read_only && self.effective_input_mode() != InputMode::None {
+                    // Posicion del cursor cacheada del ultimo dibujado, relativa
+                    // al area — que es justo lo que espera `show_text_ime`. La
+                    // primera vez que se enfoca un campo puede estar a cero: no
+                    // importa, porque lo unico que decide el teclado es el foco,
+                    // y el dibujado siguiente corrige el sitio.
+                    let caret = Rect {
+                        pos: self.cached_caret_offset,
+                        size: self.cached_caret_size,
+                    };
+                    cx.show_text_ime_with_config(
+                        self.draw_bg.area(),
+                        caret,
+                        self.get_ime_config(),
+                    );
+                }
+
                 cx.widget_action(uid, TextInputAction::KeyFocus);
             }
             Hit::KeyFocusLost(_) => {

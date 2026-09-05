@@ -520,6 +520,16 @@ pub struct ToWasmWindowGotFocus {}
 #[derive(ToWasm)]
 pub struct ToWasmWindowLostFocus {}
 
+/// El usuario cerró el teclado en pantalla (tecla de atrás, gesto de bajarlo).
+///
+/// Sólo lo manda el navegador en un aparato táctil, y sólo cuando el textarea
+/// oculto pierde el foco sin que lo hayamos soltado nosotros. Sin esto, la
+/// aplicación seguiría creyendo que el teclado está abierto y volvería a pedirlo
+/// en el siguiente dibujado, con lo que el usuario NO PODRÍA CERRARLO: lo baja,
+/// vuelve a subir, y la mitad de la pantalla se queda comida.
+#[derive(ToWasm)]
+pub struct ToWasmTextIMEWasDismissed {}
+
 #[derive(ToWasm)]
 pub struct ToWasmHTTPResponse {
     pub request_id_lo: u32,

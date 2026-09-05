@@ -543,6 +543,20 @@ impl Widget for Button {
                 }
             }
             Hit::FingerHoverOut(_) => {
+                // 🔴 Y devolver el cursor. Sin esto se queda en `Hand` PARA
+                // SIEMPRE en cuanto el puntero pasa por un botón: el cursor lo
+                // fija quien atiende el hover, y si al salir nadie lo repone,
+                // conserva el último. El síntoma que lo delató (Antonio,
+                // 2026-08-29): «paso por un botón y ya no vuelve la flecha, se
+                // queda la mano lo pase por donde lo pase».
+                //
+                // Y la razón de que costara verlo: un `TextInput` SÍ pone el
+                // suyo, así que entrar en un campo de búsqueda parecía
+                // arreglarlo — lo que en realidad hacía era taparlo con otro
+                // cursor, y al salir del campo volvía la flecha porque el campo
+                // sí la repone. O sea que el fallo se escondía justo donde uno
+                // va a comprobarlo.
+                cx.set_cursor(MouseCursor::Default);
                 self.animator_play(cx, ids!(hover.off));
             }
             // A focused button can be fired from the keyboard, with Enter or

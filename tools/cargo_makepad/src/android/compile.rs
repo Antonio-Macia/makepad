@@ -1,5 +1,5 @@
 use super::sdk::{AndroidSDKUrls, BUILD_TOOLS_DIR, BUNDLETOOL_JAR_REL, PLATFORMS_DIR};
-use crate::android::{AndroidConfig, AndroidTarget, AndroidVariant, HostOs, ManifestArgs};
+use crate::android::{AndroidConfig, AndroidTarget, AndroidVariant, HostOs, ManifestArgs, SmallFonts};
 use crate::makepad_shell::*;
 use crate::utils::*;
 use makepad_zip_file::*;
@@ -283,13 +283,40 @@ pub struct BuildResult {
     java_url: String,
 }
 
-const SMALL_FONT_REPLACEMENTS: [(&str, &str); 5] = [
-    ("GoNotoKurrent-Bold.ttf", "IBMPlexSans-SemiBold.ttf"),
-    ("GoNotoKurrent-Regular.ttf", "IBMPlexSans-Text.ttf"),
-    ("LXGWWenKaiBold.ttf", "IBMPlexSans-Text.ttf"),
-    ("LXGWWenKaiRegular.ttf", "IBMPlexSans-Text.ttf"),
-    ("NotoColorEmoji.ttf", "IBMPlexSans-Text.ttf"),
+/// Qué fuente grande se sustituye por cuál, y **a qué grupo pertenece**.
+///
+/// El grupo es lo que permite soltar el emoji sin perder las CJK; ver
+/// [`SmallFonts`]. Antes esto era una lista plana y el flag era todo o nada.
+///
+/// ⚠ **`GoNotoKurrent-*` no existe en este árbol** y lleva tiempo sin existir:
+/// las dos entradas del grupo `unicode` no casan hoy con ningún fichero. Se
+/// dejan porque pueden volver, pero es justo el motivo de que ahora haya un
+/// aviso al final si un grupo pedido no sustituyó nada — hasta hoy eso era un
+/// no-op silencioso, y la APK salía del tamaño de siempre sin que nadie lo
+/// notara.
+const SMALL_FONT_REPLACEMENTS: [(&str, &str, &str); 5] = [
+    ("unicode", "GoNotoKurrent-Bold.ttf", "IBMPlexSans-SemiBold.ttf"),
+    ("unicode", "GoNotoKurrent-Regular.ttf", "IBMPlexSans-Text.ttf"),
+    ("cjk", "LXGWWenKaiBold.ttf", "IBMPlexSans-Text.ttf"),
+    ("cjk", "LXGWWenKaiRegular.ttf", "IBMPlexSans-Text.ttf"),
+    ("emoji", "NotoColorEmoji.ttf", "IBMPlexSans-Text.ttf"),
 ];
+
+/// ¿Está pedido el grupo de esta entrada?
+fn grupo_pedido(small: &SmallFonts, grupo: &str) -> bool {
+    match grupo {
+        "cjk" => small.cjk,
+        "emoji" => small.emoji,
+        "unicode" => small.unicode,
+        _ => false,
+    }
+}
+
+/// Grupos que de verdad sustituyeron algún fichero, para poder avisar de los
+/// que no. Se acumula durante todo el empaquetado y se revisa una vez al final:
+/// una fuente puede estar en un crate y no en otro, así que mirarlo por crate
+/// daría falsos avisos.
+type GruposTocados = std::collections::HashSet<&'static str>;
 
 fn main_java(url: &str) -> String {
     format!(
@@ -1707,8 +1734,13 @@ fn add_resources(
     let mut assets_to_add: Vec<String> = Vec::new();
 
     let build_crate_dir = get_crate_dir(build_crate)?;
+    // Registro de qué grupos de fuentes sustituyeron algo de verdad. Se revisa
+    // al final: una fuente puede estar en un crate y no en otro, así que
+    // mirarlo por crate daría avisos falsos.
+    let tocados = &mut GruposTocados::new();
     add_assets_dir_to_apk(
         &build_paths.out_dir,
+        tocados,
         &mut assets_to_add,
         build_crate,
         &build_crate_dir.join("resources"),
@@ -1717,6 +1749,7 @@ fn add_resources(
     )?;
     add_font_assets_dir_to_apk(
         &build_paths.out_dir,
+        tocados,
         &mut assets_to_add,
         build_crate,
         &build_crate_dir.join("fonts"),
@@ -1728,6 +1761,7 @@ fn add_resources(
     for (name, dep_dir) in deps.iter() {
         add_assets_dir_to_apk(
             &build_paths.out_dir,
+            tocados,
             &mut assets_to_add,
             name,
             &dep_dir.join("resources"),
@@ -1736,6 +1770,7 @@ fn add_resources(
         )?;
         add_font_assets_dir_to_apk(
             &build_paths.out_dir,
+            tocados,
             &mut assets_to_add,
             name,
             &dep_dir.join("fonts"),
@@ -1776,7 +1811,61 @@ fn add_resources(
         &aapt_args,
     )?;
 
+    avisar_grupos_que_no_tocaron_nada(&config.small_fonts, tocados);
+
     Ok(())
+}
+
+/// 🔴 Avisa si un grupo pedido con `--small-fonts` **no sustituyó ni un fichero**.
+///
+/// Sin esto, pedir un grupo cuyas fuentes ya no existen es un **no-op
+/// silencioso**: la APK sale del tamaño de siempre y el que lo pidió cree que ha
+/// ahorrado. Y no es hipotético — `GoNotoKurrent-*` (el grupo `unicode`) lleva
+/// tiempo sin estar en el árbol, así que hoy mismo dos de las cinco entradas de
+/// la tabla no casan con nada y nadie se había enterado.
+///
+/// Es también la red para el futuro: el día que upstream renombre o quite una
+/// fuente, esto lo dice en el build en vez de dejar que la APK engorde 10 MB en
+/// silencio.
+fn avisar_grupos_que_no_tocaron_nada(small: &SmallFonts, tocados: &GruposTocados) {
+    if !small.alguna() {
+        return;
+    }
+    // Si pidió «todas» sin nombrar nada, sólo se avisa cuando NO se sustituyó
+    // absolutamente nada — que sí es un problema suyo. Avisar de cada grupo
+    // vacío ahí saldría en todos los builds (hoy mismo `unicode` está vacío
+    // siempre), y un aviso permanente se ignora, incluido el día que importe.
+    if !small.explicitos {
+        if tocados.is_empty() {
+            println!(
+                "⚠ --small-fonts no sustituyó ninguna fuente: la APK pesa lo \
+                 mismo. Ninguna de las fuentes grandes conocidas está en este \
+                 árbol — probablemente cambiaron de nombre río arriba."
+            );
+        }
+        return;
+    }
+    let vacios: Vec<&str> = small
+        .nombres()
+        .into_iter()
+        .filter(|g| !tocados.contains(g))
+        .collect();
+    if vacios.is_empty() {
+        return;
+    }
+    println!(
+        "⚠ --small-fonts: el grupo «{}» no sustituyó ningún fichero, así que no \
+         ha ahorrado nada. O sus fuentes ya no están en el árbol, o esta app no \
+         las empaqueta. Grupos que SÍ sustituyeron: {}.",
+        vacios.join("», «"),
+        if tocados.is_empty() {
+            "ninguno".to_string()
+        } else {
+            let mut t: Vec<&str> = tocados.iter().copied().collect();
+            t.sort_unstable();
+            t.join(", ")
+        }
+    );
 }
 
 // resources/ios is iOS-only; resources/android ships as runtime assets minus
@@ -1797,6 +1886,7 @@ fn cp_android_runtime_assets(source_dir: &Path, dst_dir: &Path) -> Result<(), St
 
 fn add_assets_dir_to_apk(
     out_dir: &Path,
+    tocados: &mut GruposTocados,
     assets_to_add: &mut Vec<String>,
     crate_name: &str,
     source_dir: &Path,
@@ -1811,12 +1901,16 @@ fn add_assets_dir_to_apk(
     let dst_dir = out_dir.join(format!("assets/makepad/{crate_name}/{asset_subdir}"));
     mkdir(&dst_dir)?;
     cp_android_runtime_assets(source_dir, &dst_dir)?;
-    if config.small_fonts && asset_subdir == "resources" {
-        for (target_name, replacement_name) in SMALL_FONT_REPLACEMENTS {
+    if config.small_fonts.alguna() && asset_subdir == "resources" {
+        for (grupo, target_name, replacement_name) in SMALL_FONT_REPLACEMENTS {
+            if !grupo_pedido(&config.small_fonts, grupo) {
+                continue;
+            }
             let replacement = source_dir.join(replacement_name);
             let target = dst_dir.join(target_name);
             if replacement.is_file() && target.is_file() {
                 cp(&replacement, &target, false)?;
+                tocados.insert(grupo);
             }
         }
     }
@@ -1831,6 +1925,7 @@ fn add_assets_dir_to_apk(
 
 fn add_font_assets_dir_to_apk(
     out_dir: &Path,
+    tocados: &mut GruposTocados,
     assets_to_add: &mut Vec<String>,
     crate_name: &str,
     source_dir: &Path,
@@ -1865,8 +1960,11 @@ fn add_font_assets_dir_to_apk(
         let path = path.display().to_string().replace("\\", "/");
         assets_to_add.push(format!("assets/makepad/{crate_name}/fonts/{path}"));
     }
-    if config.small_fonts {
-        for (target_name, replacement_name) in SMALL_FONT_REPLACEMENTS {
+    if config.small_fonts.alguna() {
+        for (grupo, target_name, replacement_name) in SMALL_FONT_REPLACEMENTS {
+            if !grupo_pedido(&config.small_fonts, grupo) {
+                continue;
+            }
             let replacement = source_dir
                 .join(replacement_name)
                 .is_file()
@@ -1881,6 +1979,7 @@ fn add_font_assets_dir_to_apk(
             if let Some(replacement) = replacement {
                 if target.is_file() {
                     cp(&replacement, &target, false)?;
+                    tocados.insert(grupo);
                 }
             }
         }
@@ -1995,6 +2094,7 @@ fn prepare_aab_paths(build_crate: &str, app_label: &str) -> Result<AabPaths, Str
 /// Mirror of `add_assets_dir_to_apk` that only stages files into a directory tree
 /// (no aapt invocation). Output structure: `<assets_root>/makepad/<crate>/<asset_subdir>/...`.
 fn stage_makepad_assets_subdir(
+    tocados: &mut GruposTocados,
     assets_root: &Path,
     crate_name: &str,
     source_dir: &Path,
@@ -2008,12 +2108,16 @@ fn stage_makepad_assets_subdir(
     let dst_dir = assets_root.join(format!("makepad/{crate_name}/{asset_subdir}"));
     mkdir(&dst_dir)?;
     cp_android_runtime_assets(source_dir, &dst_dir)?;
-    if config.small_fonts && asset_subdir == "resources" {
-        for (target_name, replacement_name) in SMALL_FONT_REPLACEMENTS {
+    if config.small_fonts.alguna() && asset_subdir == "resources" {
+        for (grupo, target_name, replacement_name) in SMALL_FONT_REPLACEMENTS {
+            if !grupo_pedido(&config.small_fonts, grupo) {
+                continue;
+            }
             let replacement = source_dir.join(replacement_name);
             let target = dst_dir.join(target_name);
             if replacement.is_file() && target.is_file() {
                 cp(&replacement, &target, false)?;
+                tocados.insert(grupo);
             }
         }
     }
@@ -2022,6 +2126,7 @@ fn stage_makepad_assets_subdir(
 
 /// Mirror of `add_font_assets_dir_to_apk` that only stages files into a directory tree.
 fn stage_makepad_font_subdir(
+    tocados: &mut GruposTocados,
     assets_root: &Path,
     crate_name: &str,
     source_dir: &Path,
@@ -2050,8 +2155,11 @@ fn stage_makepad_font_subdir(
         }
         cp(&source_dir.join(path), &dst_dir.join(path), false)?;
     }
-    if config.small_fonts {
-        for (target_name, replacement_name) in SMALL_FONT_REPLACEMENTS {
+    if config.small_fonts.alguna() {
+        for (grupo, target_name, replacement_name) in SMALL_FONT_REPLACEMENTS {
+            if !grupo_pedido(&config.small_fonts, grupo) {
+                continue;
+            }
             let replacement = source_dir
                 .join(replacement_name)
                 .is_file()
@@ -2066,6 +2174,7 @@ fn stage_makepad_font_subdir(
             if let Some(replacement) = replacement {
                 if target.is_file() {
                     cp(&replacement, &target, false)?;
+                    tocados.insert(grupo);
                 }
             }
         }
@@ -2082,7 +2191,10 @@ fn stage_aab_assets(
     config: &AndroidConfig,
 ) -> Result<(), String> {
     let build_crate_dir = get_crate_dir(build_crate)?;
+    // Mismo registro que en `add_resources`: ver `avisar_grupos_que_no_tocaron_nada`.
+    let tocados = &mut GruposTocados::new();
     stage_makepad_assets_subdir(
+        tocados,
         assets_root,
         build_crate,
         &build_crate_dir.join("resources"),
@@ -2090,6 +2202,7 @@ fn stage_aab_assets(
         config,
     )?;
     stage_makepad_font_subdir(
+        tocados,
         assets_root,
         build_crate,
         &build_crate_dir.join("fonts"),
@@ -2100,6 +2213,7 @@ fn stage_aab_assets(
     let deps = get_crate_dep_dirs(build_crate, build_dir, &android_targets[0].toolchain());
     for (name, dep_dir) in deps.iter() {
         stage_makepad_assets_subdir(
+            tocados,
             assets_root,
             name,
             &dep_dir.join("resources"),
@@ -2107,6 +2221,7 @@ fn stage_aab_assets(
             config,
         )?;
         stage_makepad_font_subdir(
+            tocados,
             assets_root,
             name,
             &dep_dir.join("fonts"),
@@ -2126,6 +2241,8 @@ fn stage_aab_assets(
             let _ = rm(&dst_dir.join(r));
         }
     }
+
+    avisar_grupos_que_no_tocaron_nada(&config.small_fonts, tocados);
 
     Ok(())
 }

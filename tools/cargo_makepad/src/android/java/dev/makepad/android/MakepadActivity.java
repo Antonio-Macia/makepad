@@ -432,8 +432,61 @@ class MakepadSurface
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
         Surface surface = holder.getSurface();
-        //surface.setFrameRate(120f,0);
+        pedirRefrescoAlto(surface);
         MakepadNative.surfaceOnSurfaceCreated(surface);
+    }
+
+    /**
+     * Le dice a Android a que ritmo podemos producir fotogramas, para que elija
+     * el modo de pantalla adecuado.
+     *
+     * POR QUE HACE FALTA: sin esto Android da 60 Hz por compatibilidad, aunque
+     * el panel admita 90 o 120. Medido en un Poco F7 Pro (2026-08-30): con una
+     * escena de 0,03 ms por fotograma —o sea, sin trabajo— el fotograma seguia
+     * durando 16,6 ms clavados. El tope no era la aplicacion.
+     *
+     * POR QUE NO SE PONE 120 A PELO (que es lo que habia aqui comentado):
+     *   - en un panel de 60 seria mentir, y Android tendria que descartarlo;
+     *   - y sobre todo, `setFrameRate` NO obliga a nadie a ir mas rapido: es una
+     *     PISTA de a que ritmo llega el contenido. Se pide el maximo que el
+     *     panel admite y el sistema decide; si la aplicacion no llega, produce
+     *     menos y el compositor lo acomoda.
+     *
+     * FRAME_RATE_COMPATIBILITY_DEFAULT (0) es justo eso: «me viene bien este
+     * ritmo, pero no me rompas nada por conseguirlo». El valor FIXED_SOURCE es
+     * para video, que tiene una cadencia rigida; una interfaz no.
+     */
+    private void pedirRefrescoAlto(Surface surface) {
+        // API 30 (Android 11) es cuando aparece setFrameRate. Por debajo no hay
+        // forma de pedirlo y el sistema se queda como estaba.
+        if (Build.VERSION.SDK_INT < 30 || surface == null) {
+            return;
+        }
+        try {
+            Context ctx = getContext();
+            if (!(ctx instanceof Activity)) {
+                return;
+            }
+            Display d = ((Activity) ctx).getWindowManager().getDefaultDisplay();
+            float mejor = 0f;
+            for (Display.Mode m : d.getSupportedModes()) {
+                // Solo los modos con la MISMA resolucion que la actual: los hay
+                // que suben el refresco bajando la resolucion, y cambiar de
+                // resolucion por detras es un efecto que nadie ha pedido.
+                if (m.getPhysicalWidth() == d.getMode().getPhysicalWidth()
+                    && m.getPhysicalHeight() == d.getMode().getPhysicalHeight()
+                    && m.getRefreshRate() > mejor) {
+                    mejor = m.getRefreshRate();
+                }
+            }
+            if (mejor > 0f) {
+                surface.setFrameRate(mejor, 0 /* COMPATIBILITY_DEFAULT */);
+            }
+        } catch (Throwable t) {
+            // Nunca se cae la aplicacion por esto: es una mejora, no un
+            // requisito. Un fabricante que devuelva algo raro en
+            // getSupportedModes no puede impedir que la app arranque.
+        }
     }
 
     @Override

@@ -1,0 +1,11 @@
+[package]
+name = "makepad-studio-embed-host"
+version = "1.0.0"
+edition = "2021"
+description = "Minimal reference host for an embedded (studio/stdin-loop) makepad app, with switchable tick policies"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-network = { path = "../../platform/network", version = "1.0.0" }
+makepad-studio-protocol = { path = "../../platform/studio", version = "0.1.0" }
+makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }

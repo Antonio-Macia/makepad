@@ -16,7 +16,9 @@ use crate::{
     window::CxWindowPool,
     CxOsApi,
 };
-use makepad_studio_protocol::{AppToStudio, GCSample, StudioToApp, StudioToAppVec};
+use makepad_studio_protocol::{
+    AppToStudio, GCSample, StudioToApp, StudioToAppVec, SWAPCHAIN_IMAGE_COUNT,
+};
 
 #[derive(Default)]
 pub(crate) struct StdinWindow {
@@ -24,6 +26,17 @@ pub(crate) struct StdinWindow {
     present_index: usize,
     readback_framebuffer: Option<u32>,
     last_trace_draw: Option<(u32, u32, u32, u32, u64)>,
+    /// Cuántas imágenes del swapchain quedan por estrenar.
+    ///
+    /// 🔴 Una interfaz QUIETA deja imágenes sin pintar y el anfitrión enseña una
+    /// de ésas, en blanco. Cada dibujado pinta UNA de las varias imágenes,
+    /// rotando; un árbol de widgets estático se dibuja una vez y ya. Aquí son
+    /// **tres**, así que el problema es peor que en Windows, donde son dos.
+    ///
+    /// Lo midió PULSO el 30-08-2026 en Windows: 13.637 `Tick`, UN
+    /// `DrawCompleteAndFlip` y 213 s de silencio, con la pantalla blanca. Ver el
+    /// comentario largo en `windows_stdin.rs`.
+    imagenes_por_estrenar: usize,
 }
 
 impl Cx {
@@ -217,6 +230,11 @@ impl Cx {
         self.call_event_handler(&Event::Startup);
         Self::stdin_send_to_host(AppToStudio::AfterStartup);
         self.stdin_handle_platform_ops(&mut stdin_windows);
+        // Nothing below turns a dirty tree into a frame except the Tick
+        // branch, so a host that never ticks fails in total silence. The
+        // watchdog is the only thing that can notice, because with no ticks
+        // this loop is parked in recv and no code of ours runs.
+        crate::studio_tick_watchdog::start_studio_tick_watchdog();
 
         loop {
             if !Self::has_studio_web_socket() {
@@ -272,6 +290,7 @@ impl Cx {
                 WebSocketMessage::Closed => break,
                 WebSocketMessage::Opened => {}
             }
+            crate::studio_tick_watchdog::note_studio_draw_pending(self.need_redrawing());
             self.run_live_edit_if_needed("linux-x11-stdin");
         }
     }
@@ -465,6 +484,9 @@ impl Cx {
                 let stdin_window = &mut stdin_windows[window_id];
                 stdin_window.swapchain = Some(new_swapchain);
                 stdin_window.present_index = 0;
+                // Todas sin estrenar: hay que pintarlas todas, no sólo la
+                // primera. Ver `imagenes_por_estrenar`.
+                stdin_window.imagenes_por_estrenar = SWAPCHAIN_IMAGE_COUNT;
 
                 let window = &mut self.windows[CxWindowPool::from_usize(window_id)];
                 let pass = &mut self.passes[window.main_pass_id.unwrap()];
@@ -483,6 +505,7 @@ impl Cx {
             }
             StudioToApp::RunViewFrameRequest(_) => {}
             StudioToApp::Tick => {
+                crate::studio_tick_watchdog::note_studio_tick();
                 if SignalToUI::check_and_clear_ui_signal() {
                     self.handle_termination_signal();
                     self.handle_media_signals();
@@ -509,8 +532,22 @@ impl Cx {
                     self.call_next_frame_event(time_now);
                 }
 
+                // Estrenar las imágenes que queden: ver `imagenes_por_estrenar`.
+                if stdin_windows
+                    .iter()
+                    .any(|w| w.imagenes_por_estrenar > 0 && w.swapchain.is_some())
+                {
+                    for w in stdin_windows.iter_mut() {
+                        if w.imagenes_por_estrenar > 0 {
+                            w.imagenes_por_estrenar -= 1;
+                        }
+                    }
+                    self.redraw_all();
+                }
+
                 if self.need_redrawing() {
                     self.call_draw_event(time_now);
+                    crate::studio_tick_watchdog::note_studio_drew();
                     self.opengl_compile_shaders();
                 }
 

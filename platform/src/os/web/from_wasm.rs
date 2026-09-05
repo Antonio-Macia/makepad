@@ -100,10 +100,36 @@ pub struct FromWasmBrowserHistoryGo {
     pub delta: f64,
 }
 
+/// Ask the browser to put keyboard focus on the hidden textarea, at a position,
+/// configured for the field the user just tapped.
+///
+/// 🔴 **On a phone this message is the ONLY thing that can open the keyboard**,
+/// and it only works if it reaches JS inside the touch handler that caused it —
+/// browsers raise the on-screen keyboard for a programmatic `focus()` only when
+/// it happens during a user gesture. See `web.js` and the `Hit::KeyFocus` arm of
+/// `text_input.rs`, which is what makes it arrive in time.
+///
+/// Everything after `y` used to be thrown away on web: the message carried a
+/// point and nothing else, so a phone got the generic keyboard for every field —
+/// no search key on a search box, no digits on a number box, no autofill hints.
+/// The values are already the web ones (`InputMode` documents itself as matching
+/// the `inputmode` attribute), so the mapping is a rename, not a translation.
 #[derive(FromWasm)]
 pub struct FromWasmShowTextIME {
     pub x: f64,
     pub y: f64,
+    /// `inputmode` attribute: which keyboard layout to offer.
+    pub input_mode: String,
+    /// `enterkeyhint` attribute: what the return key should say and do.
+    pub enter_key_hint: String,
+    /// `autocapitalize` attribute.
+    pub autocapitalize: String,
+    /// `autocorrect` attribute (`on`/`off`).
+    pub autocorrect: String,
+    /// `autocomplete` attribute: the autofill hint (`username`, `email`…).
+    pub autocomplete: String,
+    /// Whether newlines are meaningful in this field.
+    pub is_multiline: bool,
 }
 
 #[derive(FromWasm)]

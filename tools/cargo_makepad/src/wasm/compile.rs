@@ -199,11 +199,47 @@ fn print_brotli_size_report(
     }
 }
 
+/// Huella corta del contenido de un fichero, para que el navegador no sirva el
+/// de ayer.
+///
+/// 🔴 **El nombre del `.wasm` no cambia entre publicaciones**, así que un
+/// navegador lo cachea y lo reutiliza: el HTML se recarga, el programa es el
+/// anterior, y **no hay ningún error**. En escritorio no se ve porque uno
+/// recarga con Ctrl+Shift+R sin pensarlo; en un móvil no hay forma cómoda de
+/// hacer eso, y lo que se ve es que un arreglo «no funciona» cuando lo que se
+/// está ejecutando es la versión de antes.
+///
+/// Lo reportó ÓRBITA el 2026-08-30 después de perder una verificación entera
+/// probando un arreglo con el wasm viejo dentro. Ellos lo apañaron en su script
+/// de publicación; se arregla aquí para que no le toque a cada consumidor
+/// descubrirlo por su cuenta.
+///
+/// FNV-1a de 64 bits: no hace falta criptografía —esto sólo tiene que CAMBIAR
+/// cuando cambie el fichero— y así no entra ninguna dependencia nueva.
+fn huella(bytes: &[u8]) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{h:016x}")
+}
+
+/// Huella de un fichero ya escrito en disco, o `None` si no se puede leer.
+///
+/// Devuelve `None` en vez de un valor inventado a proposito: una huella falsa
+/// serviria el fichero viejo igual, y encima con aspecto de estar resuelto.
+fn huella_de_fichero(ruta: &Path) -> Option<String> {
+    fs::read(ruta).ok().map(|b| huella(&b))
+}
+
 pub fn generate_html(
     wasm: &str,
     split_data_path: Option<&str>,
     secondary_wasm_path: Option<&str>,
     defer_secondary_wasm: bool,
+    // Sufijo `?v=<huella>` para que el navegador no reutilice el wasm anterior.
+    version: &str,
     config: &WasmConfig,
 ) -> String {
     let init = if config.bindgen {
@@ -214,7 +250,7 @@ pub fn generate_html(
     
             let env = {{}};
             let set_wasm = init_env(env);
-            let module = await WebAssembly.compileStreaming(fetch('./{wasm}.wasm'))
+            let module = await WebAssembly.compileStreaming(fetch('./{wasm}.wasm{version}'))
             let wasm = await init({{module_or_path: module}}, env);
             set_wasm(wasm);
 
@@ -231,6 +267,12 @@ pub fn generate_html(
         } else {
             ""
         };
+        // Los trozos partidos llevan la misma huella: si se firma solo el
+        // principal, un cambio que caiga en un trozo se sirve del cache igual.
+        let split_data_path = split_data_path.map(|p| format!("{p}{version}"));
+        let secondary_wasm_path = secondary_wasm_path.map(|p| format!("{p}{version}"));
+        let split_data_path = split_data_path.as_deref();
+        let secondary_wasm_path = secondary_wasm_path.as_deref();
         let split_options = match (split_data_path, secondary_wasm_path) {
             (Some(data), Some(funcs)) => format!(
                 ", undefined, {{ split_data_url: '{data}', secondary_wasm_url: '{funcs}'{defer_secondary} }}"
@@ -245,7 +287,7 @@ pub fn generate_html(
             "
             const {{WasmWebGL}} = await import('./makepad_platform/web_gl.js');
             const wasm = await WasmWebGL.fetch_and_instantiate_wasm(
-                './{wasm}.wasm'{split_options}
+                './{wasm}.wasm{version}'{split_options}
             );
             "
         )
@@ -1015,11 +1057,29 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     };
     // generate html file
     let index_path = app_dir.join("index.html");
+    // La huella sale del wasm QUE SE ACABA DE ESCRIBIR, no del que hubiera
+    // antes: es lo que garantiza que cambie exactamente cuando cambia el
+    // programa.
+    let version = match huella_de_fichero(&wasm_dest) {
+        Some(h) => format!("?v={}", &h[..12]),
+        None => {
+            // Tercer estado, dicho en voz alta: no se pudo firmar. Callar aqui
+            // dejaria al consumidor sirviendo el wasm de ayer sin saberlo, que
+            // es justo el fallo que esto viene a evitar.
+            println!(
+                "⚠ no se pudo leer {:?} para firmar el wasm: el navegador puede \
+                 servir la version anterior en cache, sin dar ningun error",
+                wasm_dest
+            );
+            String::new()
+        }
+    };
     let html = generate_html(
         build_crate,
         split_data_path.as_deref(),
         secondary_wasm_path.as_deref(),
         defer_secondary_wasm,
+        &version,
         &config,
     );
     fs::write(&index_path, &html.as_bytes())

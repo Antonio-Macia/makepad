@@ -49,6 +49,8 @@ mod live_reload;
 mod macos_menu;
 mod performance_stats;
 pub mod memory_watchdog;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod studio_tick_watchdog;
 pub mod perf_monitor;
 pub mod permission;
 mod texture;
