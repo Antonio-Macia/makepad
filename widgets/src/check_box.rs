@@ -519,6 +519,41 @@ impl Widget for CheckBox {
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, ids!(hover.off));
             }
+            // A focused checkbox toggles with Space — the universal convention,
+            // and the one a screen-reader user expects. Enter is deliberately NOT
+            // bound here: in a form, Enter submits, and a checkbox that swallowed
+            // it would break the form for everyone who never touches the mouse.
+            //
+            // ⚠ Without this the box joins the Tab chain and paints its focus ring
+            // — it *looks* reachable — and then no key toggles it. "Reachable but
+            // not operable" is worse than not reachable at all: it promises a way
+            // in that does not exist, and a mouse test never notices.
+            Hit::KeyDown(ke) if ke.key_code == KeyCode::Space => {
+                let new_active = if self.animator_in_state(cx, ids!(active.on)) {
+                    self.animator_play(cx, ids!(active.off));
+                    cx.widget_action_with_data(
+                        &self.action_data,
+                        uid,
+                        CheckBoxAction::Change(false),
+                    );
+                    false
+                } else {
+                    self.animator_play(cx, ids!(active.on));
+                    cx.widget_action_with_data(
+                        &self.action_data,
+                        uid,
+                        CheckBoxAction::Change(true),
+                    );
+                    true
+                };
+                cx.widget_to_script_call(
+                    uid,
+                    NIL,
+                    self.source.clone(),
+                    self.on_click.clone(),
+                    &[ScriptValue::from_bool(new_active)],
+                );
+            }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 self.set_key_focus(cx);
                 let new_active = if self.animator_in_state(cx, ids!(active.on)) {

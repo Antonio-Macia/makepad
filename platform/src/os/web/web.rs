@@ -102,6 +102,32 @@ impl Cx {
                     self.xr_capabilities = tw.xr_capabilities.into();
                     let id_zero = CxWindowPool::id_zero();
                     let mut new_geom: WindowGeom = tw.window_info.into();
+
+                    // `Event::Startup` es lo que CONSTRUYE la app, y con ella su
+                    // `Window` — que es quien reserva la ventana 0 en el pool. Por
+                    // eso va antes de tocar `self.windows[id_zero]`: hasta que la
+                    // app no existe, el pool está vacío (`Cx::new` lo deja en
+                    // `Default::default()`), y ese acceso panicaba con
+                    // `index out of bounds: the len is 0 but the index is 0` en el
+                    // PRIMER mensaje que llega a `process_to_wasm`. La pantalla se
+                    // quedaba en negro con «Loading..» y sin más pista que el
+                    // índice.
+                    //
+                    // Es el mismo orden que ya usan las plataformas nativas
+                    // (`os/windows/windows.rs`: `Startup` y después `redraw_all`),
+                    // así que esto alinea web con ellas en vez de inventar nada.
+                    //
+                    // Sólo se veía sin hilos: con hilos, el fallo de
+                    // `SharedArrayBuffer` fuera de un contexto aislado mata la
+                    // carga antes de llegar aquí, así que el pánico quedaba tapado
+                    // por otro error anterior.
+                    self.os.window_geom = new_geom.clone();
+                    self.set_physical_keyboard_state(true);
+                    self.call_event_handler(&Event::Startup);
+
+                    // Y AHORA la geometría, con la ventana ya reservada. El dpi y
+                    // el `native_window_geom_to_layout` se aplican después porque
+                    // necesitan el `CxWindow`, no al revés.
                     {
                         let window = &mut self.windows[id_zero];
                         window.os_dpi_factor = Some(new_geom.dpi_factor);
@@ -109,10 +135,7 @@ impl Cx {
                     }
                     self.os.window_geom = new_geom.clone();
                     self.windows[id_zero].window_geom = new_geom;
-                    //self.default_inner_window_size = self.os.window_geom.inner_size;
 
-                    self.set_physical_keyboard_state(true);
-                    self.call_event_handler(&Event::Startup);
                     self.redraw_all();
                     //self.platform.from_wasm(FromWasmCreateThread{thread_id:1});
                 }

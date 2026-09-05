@@ -545,6 +545,57 @@ impl Widget for Button {
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, ids!(hover.off));
             }
+            // A focused button can be fired from the keyboard, with Enter or
+            // Space, exactly as every desktop toolkit does.
+            //
+            // ⚠ Without this the button joins the Tab chain and paints its focus
+            // ring — so it *looks* reachable — and then nothing happens when you
+            // press Enter. "Reachable but not operable" is the worst of the three
+            // states: a keyboard user is told the control is available and it
+            // isn't, and a mouse test never notices.
+            //
+            // Enter AND Space, because the two conventions coexist: Enter is the
+            // default action on Windows/Linux, Space is what a screen-reader user
+            // presses on a button that already has focus.
+            // A focused button can be fired from the keyboard, with Enter or
+            // Space, exactly as every desktop toolkit does.
+            //
+            // ⚠ Without this the button joins the Tab chain and paints its focus
+            // ring — so it *looks* reachable — and then nothing happens when you
+            // press Enter. "Reachable but not operable" is the worst of the three
+            // states: a keyboard user is told the control is available and it
+            // isn't, and a mouse test never notices.
+            //
+            // Enter AND Space, because the two conventions coexist: Enter is the
+            // default action on Windows/Linux, Space is what a screen-reader user
+            // presses on a button that already has focus.
+            //
+            // 🔴 ONLY `Clicked`, and this cost a measurement. The first version
+            // also emitted `Pressed` first, "so a consumer listening to either one
+            // sees the keyboard" — and that BROKE it: `clicked()` reads through
+            // `find_widget_action`, which returns the FIRST action this widget
+            // emitted in the batch. With `Pressed` ahead of it, the cast to
+            // `Clicked` failed and `clicked()` answered `false` while the action
+            // was being emitted perfectly. Nothing errored; the button simply did
+            // nothing. The pointer path never hits this because `Pressed` (finger
+            // down) and `Clicked` (finger up) land in different batches.
+            Hit::KeyDown(ke)
+                if self.enabled
+                    && matches!(ke.key_code, KeyCode::ReturnKey | KeyCode::Space) =>
+            {
+                cx.widget_action_with_data(
+                    &self.action_data,
+                    uid,
+                    ButtonAction::Clicked(ke.modifiers),
+                );
+                cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_click.clone(), &[]);
+                // The same visual feedback as a tap, so the key press is SEEN.
+                // A control that fires without moving reads as "it didn't work".
+                self.animator_play(cx, ids!(hover.down));
+            }
+            Hit::KeyUp(ke) if matches!(ke.key_code, KeyCode::ReturnKey | KeyCode::Space) => {
+                self.animator_play(cx, ids!(hover.off));
+            }
             Hit::FingerLongPress(_lp) if self.enabled && self.enable_long_press => {
                 cx.widget_action_with_data(&self.action_data, uid, ButtonAction::LongPressed);
             }
