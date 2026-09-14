@@ -573,15 +573,31 @@ fn generate_android_wrapper_manifest(
     wrapper_manifest.push_str("\n[workspace]\n");
     wrapper_manifest.push_str("resolver = \"2\"\n");
 
+    // Bring the workspace's `[patch]` sections along, so a build that redirects a
+    // git dependency to a local checkout keeps doing so inside the wrapper.
+    //
+    // Skipped when the crate IS its own workspace, because then this is the very
+    // same file that `rewrite_wrapper_manifest_paths` already copied above:
+    // adding it again emits the section twice and cargo refuses the manifest
+    // with "duplicate key", pointing at a generated file under `target/` that
+    // the user never wrote. A single-crate workspace is the common shape for an
+    // app, so this hit anyone who patched a dependency.
     let workspace_manifest_path = workspace_root.join("Cargo.toml");
-    if let Ok(workspace_manifest) = fs::read_to_string(&workspace_manifest_path) {
-        let workspace_patches = extract_workspace_patch_sections(&workspace_manifest);
-        if !workspace_patches.trim().is_empty() {
-            wrapper_manifest.push('\n');
-            wrapper_manifest.push_str(&rewrite_wrapper_manifest_paths(
-                &workspace_patches,
-                &workspace_root,
-            ));
+    let crate_is_the_workspace = workspace_manifest_path
+        .canonicalize()
+        .ok()
+        .zip(cargo_toml_path.canonicalize().ok())
+        .is_some_and(|(a, b)| a == b);
+    if !crate_is_the_workspace {
+        if let Ok(workspace_manifest) = fs::read_to_string(&workspace_manifest_path) {
+            let workspace_patches = extract_workspace_patch_sections(&workspace_manifest);
+            if !workspace_patches.trim().is_empty() {
+                wrapper_manifest.push('\n');
+                wrapper_manifest.push_str(&rewrite_wrapper_manifest_paths(
+                    &workspace_patches,
+                    &workspace_root,
+                ));
+            }
         }
     }
 
