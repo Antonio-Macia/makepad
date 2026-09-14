@@ -2033,6 +2033,10 @@ impl Cx {
             };
 
             cx.os.dpi_factor = android_params.density;
+            // Publish the user's accessibility text size so widgets can reach it
+            // without knowing which platform they run on. Kept separate from
+            // `dpi_factor` on purpose -- see `DisplayContext::text_scale`.
+            cx.display_context.text_scale = android_params.font_scale;
             cx.os_type = OsType::Android(android_params);
             if let Some(connected) = initial_physical_keyboard {
                 cx.set_physical_keyboard_state(connected);

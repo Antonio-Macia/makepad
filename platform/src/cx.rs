@@ -242,6 +242,26 @@ pub struct AndroidParams {
     pub data_path: String,
     #[live]
     pub density: f64,
+    /// The text size multiplier the user asked for in the system accessibility
+    /// settings (1.0 = normal; Android goes up to 2.0).
+    ///
+    /// Kept SEPARATE from `density` on purpose, and that separation is the whole
+    /// reason this field exists. Android has two distinct settings -- "display
+    /// size" and "font size" -- because they solve two different problems: the
+    /// first is how much information fits, the second is whether anyone can READ
+    /// it. Someone who raises the second does it because of their eyesight, and
+    /// scaling the layout instead just moves the same problem around.
+    ///
+    /// Until now makepad only received `density`, so every app built with it
+    /// ignored that setting entirely: raising it changed nothing at all. Checked
+    /// with grep on both the Java and the Rust side -- zero hits.
+    ///
+    /// Receiving it is NOT applying it: whoever lays out text has to multiply
+    /// its size by this. The two steps are deliberately separate, because
+    /// applying it changes the look of every existing app and that decision does
+    /// not belong to whoever adds the value.
+    #[live(1.0)]
+    pub font_scale: f64,
     #[live]
     pub is_emulator: bool,
     #[live]

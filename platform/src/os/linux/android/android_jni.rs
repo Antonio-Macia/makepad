@@ -646,6 +646,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onAndroidParams(
     cache_path: jni_sys::jstring,
     data_path: jni_sys::jstring,
     density: jni_sys::jfloat,
+    font_scale: jni_sys::jfloat,
     is_emulator: jni_sys::jboolean,
     android_version: jni_sys::jstring,
     build_number: jni_sys::jstring,
@@ -655,6 +656,9 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onAndroidParams(
         cache_path: jstring_to_string(env, cache_path),
         data_path: jstring_to_string(env, data_path),
         density: density as f64,
+        // Fall back to 1.0 if the system doesn't report it: that is the neutral
+        // multiplier, and a scale of 0 would render every glyph invisible.
+        font_scale: if font_scale > 0.0 { font_scale as f64 } else { 1.0 },
         is_emulator: is_emulator != 0,
         android_version: jstring_to_string(env, android_version),
         build_number: jstring_to_string(env, build_number),
