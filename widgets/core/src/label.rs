@@ -11,6 +11,24 @@ script_mod! {
     mod.widgets.Label = set_type_default() do mod.widgets.LabelBase{
         width: Fit
         height: Fit
+        // 🔴 DECLARADO AQUI, y no solo como `#[live(Flow::right_wrap())]` en el
+        // campo (14-09-2026). El type-default del campo NO llega en Android 15+:
+        // el Label nace con `Flow::default()`, que es `wrap: false`, y entonces
+        // `DrawText` no envuelve —el wrap lo decide el flujo del contenedor, no
+        // el texto— asi que un texto largo se corta a media palabra y su hueco
+        // no crece.
+        //
+        // Medido con el MISMO binario (md5 identico) en tres aparatos:
+        //   Galaxy S9+  Android 10  wrap=true   correcto
+        //   Poco F7     Android 16  wrap=false  cortado
+        //   Redmi Pad   Android 16  wrap=false  cortado
+        // y en Windows correcto. En pantalla ANCHA no se nota, porque la linea
+        // cabe de casualidad: la tablet tiene 777 dp y falla igual.
+        //
+        // Declararlo en el DSL lo pone en la cadena de prototipos, que es lo que
+        // sobrevive a un re-apply y no depende de que el type-default del campo
+        // llegue. Es ademas como ya lo hace `html.rs` para sus propios bloques.
+        flow: Flow.Right{wrap: true}
         padding: theme.mspace_1
 
         draw_text +: {
