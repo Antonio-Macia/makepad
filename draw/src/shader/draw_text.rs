@@ -1301,7 +1301,14 @@ pub struct DrawText {
     /// text does not fill the full `max_width_in_lpxs`. `x: 0.0` = left,
     /// `0.5` = center, `1.0` = right. `y` is currently unused by the
     /// layouter. Reset to `Align::default()` per draw by callers that care.
-    #[rust]
+    ///
+    /// `#[live]` so it can be set from the DSL (`draw_text: { layout_align: ... }`).
+    /// It used to be `#[rust]`, which left centering a label's TEXT reachable only
+    /// from Rust -- and the obvious DSL workaround, putting `align` on the Label
+    /// itself, makes a `width: Fill` label measure zero and draw nothing at all.
+    /// Aligning the box is not aligning the text, and only one of the two was
+    /// reachable where layouts are written.
+    #[live]
     pub layout_align: Align,
 
     /// Maximum number of lines to display. 0 means unlimited (default).
