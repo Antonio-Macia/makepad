@@ -1488,6 +1488,17 @@ public class MakepadActivity
         String cache_path = this.getCacheDir().getAbsolutePath();
         String data_path = this.getFilesDir().getAbsolutePath();
         float density = getResources().getDisplayMetrics().density;
+        // Text scale is SEPARATE from density, and they are not the same thing.
+        //
+        // Android has two distinct settings -- "display size" and "font size" --
+        // because they solve two different problems: how much information fits,
+        // and whether anyone can READ it. Until now makepad only sent density,
+        // so every app built with it ignored the second one: a user who raised
+        // it because of their eyesight saw no change at all.
+        //
+        // `getConfiguration().fontScale` is the value the user picked
+        // (1.0 normal, up to 2.0 on modern Android).
+        float fontScale = getResources().getConfiguration().fontScale;
         boolean isEmulator = this.isEmulator();
         String androidVersion = Build.VERSION.RELEASE;
         String buildNumber = Build.DISPLAY;
@@ -1495,7 +1506,7 @@ public class MakepadActivity
 
         // Makepad ignores the kernel version, but the slot stays so the native
         // signature doesn't change.
-        MakepadNative.onAndroidParams(cache_path, data_path, density, isEmulator, androidVersion, buildNumber, "");
+        MakepadNative.onAndroidParams(cache_path, data_path, density, fontScale, isEmulator, androidVersion, buildNumber, "");
 
         // Set volume keys to control music stream, we might want make this flexible for app devs
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
