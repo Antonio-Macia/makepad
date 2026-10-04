@@ -33,7 +33,7 @@ use crate::{
             Graphics::{
                 Direct3D::{
                     Fxc::D3DCompile, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
-                    D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_SRV_DIMENSION,
+                    D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_SRV_DIMENSION,
                     D3D_SRV_DIMENSION_TEXTURECUBE,
                 },
                 Direct3D11::{
@@ -90,7 +90,7 @@ use crate::{
                         DXGI_FORMAT_R8_UNORM,
                         DXGI_SAMPLE_DESC,
                     },
-                    CreateDXGIFactory2, IDXGIFactory2, IDXGIKeyedMutex, IDXGIResource1,
+                    CreateDXGIFactory2, IDXGIAdapter, IDXGIFactory2, IDXGIKeyedMutex, IDXGIResource1,
                     IDXGISwapChain, IDXGISwapChain1, IDXGISwapChain2, DXGI_CREATE_FACTORY_FLAGS,
                     DXGI_ERROR_WAS_STILL_DRAWING, DXGI_FRAME_STATISTICS, DXGI_PRESENT,
                     DXGI_PRESENT_DO_NOT_WAIT, DXGI_RGBA, DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1,
@@ -2567,76 +2567,272 @@ pub struct D3d11Cx {
     /// Once-per-outage latch for failures the device itself says it survived, so a call site
     /// that runs every frame cannot fill the log.
     other_error_logged: Cell<bool>,
+    /// The device is WARP, the software rasterizer, because no hardware device came up
+    /// at startup. Recovery may only fall back to WARP when this is already true.
+    on_warp: bool,
+}
+
+/// `D3D_DRIVER_TYPE_WARP` from `d3dcommon.h`. The vendored `windows` crate is
+/// trimmed to what the toolkit used and does not carry this constant.
+const D3D_DRIVER_TYPE_WARP: D3D_DRIVER_TYPE = D3D_DRIVER_TYPE(5);
+
+const D3D11_CREATE_DEVICE_BGRA_SUPPORT: u32 = 0x20;
+const D3D11_CREATE_DEVICE_VIDEO_SUPPORT: u32 = 0x800;
+
+/// Test hook: a comma-separated list of device attempts to fail on purpose,
+/// so every fallback path can be exercised on a machine whose GPU is fine.
+/// Names: `hardware-video`, `hardware`, `warp`. Setting all three shows the
+/// error dialog instead of starting.
+const FORCE_FAIL_ENV: &str = "MAKEPAD_D3D11_FORCE_FAIL";
+
+/// One way of creating the device, tried in order by `D3d11Cx::create_device_tier`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeviceAttempt {
+    /// The first adapter, with video decode support. What the toolkit always
+    /// asked for, and what video playback through Media Foundation needs.
+    HardwareVideo,
+    /// The first adapter without `VIDEO_SUPPORT`: some drivers (remote
+    /// desktop, older or virtual GPUs) refuse the device only because of that
+    /// flag. Drawing works the same; hardware video decode does not.
+    Hardware,
+    /// WARP, Microsoft's software rasterizer, present on every Windows since
+    /// 8. Slow, but the app starts and shows its UI instead of vanishing.
+    Warp,
+}
+
+impl DeviceAttempt {
+    /// The order tried at startup: the first device that comes up wins.
+    const ALL: [DeviceAttempt; 3] = [
+        DeviceAttempt::HardwareVideo,
+        DeviceAttempt::Hardware,
+        DeviceAttempt::Warp,
+    ];
+
+    /// The order tried when rebuilding after a device loss on a hardware device.
+    ///
+    /// WARP is left out ON PURPOSE. Recovery runs while the display driver may
+    /// still be restarting, when the hardware attempts fail for a few hundred
+    /// milliseconds and WARP does not: with WARP in the list, a driver update
+    /// would leave the app rendering in software for the rest of its life.
+    /// The caller retries on a later tick, and an adapter 0 always exists
+    /// (Microsoft Basic Render Driver at worst), so waiting cannot hang.
+    const HARDWARE: [DeviceAttempt; 2] = [DeviceAttempt::HardwareVideo, DeviceAttempt::Hardware];
+
+    fn name(self) -> &'static str {
+        match self {
+            DeviceAttempt::HardwareVideo => "hardware-video",
+            DeviceAttempt::Hardware => "hardware",
+            DeviceAttempt::Warp => "warp",
+        }
+    }
+
+    fn forced_to_fail(self) -> bool {
+        std::env::var(FORCE_FAIL_ENV).map_or(false, |list| {
+            list.split(',').any(|name| name.trim() == self.name())
+        })
+    }
+
+    /// Creates the device and its immediate context, or says why not.
+    unsafe fn create(
+        self,
+        factory: &IDXGIFactory2,
+    ) -> Result<(ID3D11Device, ID3D11DeviceContext), String> {
+        if self.forced_to_fail() {
+            return Err(format!("forced to fail by {FORCE_FAIL_ENV}"));
+        }
+        let mut device: Option<ID3D11Device> = None;
+        let mut context: Option<ID3D11DeviceContext> = None;
+        let result = match self {
+            DeviceAttempt::HardwareVideo | DeviceAttempt::Hardware => {
+                let adapter = factory
+                    .EnumAdapters(0)
+                    .map_err(|e| format!("no graphics adapter (EnumAdapters(0): {e})"))?;
+                if let Ok(desc) = adapter.GetDesc() {
+                    let len = desc.Description.iter().position(|c| *c == 0).unwrap_or(desc.Description.len());
+                    crate::system_info::note_gpu_adapter(&String::from_utf16_lossy(&desc.Description[..len]));
+                }
+                let flags = match self {
+                    DeviceAttempt::HardwareVideo => {
+                        D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT
+                    }
+                    _ => D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                };
+                D3D11CreateDevice(
+                    &adapter,
+                    D3D_DRIVER_TYPE_UNKNOWN,
+                    HMODULE(std::ptr::null_mut()),
+                    D3D11_CREATE_DEVICE_FLAG(flags),
+                    Some(&[D3D_FEATURE_LEVEL_11_0]),
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    Some(&mut context),
+                )
+            }
+            // With a driver type other than UNKNOWN the adapter must be null.
+            DeviceAttempt::Warp => {
+                crate::system_info::note_gpu_adapter("Microsoft WARP (software)");
+                D3D11CreateDevice(
+                    None::<&IDXGIAdapter>,
+                    D3D_DRIVER_TYPE_WARP,
+                    HMODULE(std::ptr::null_mut()),
+                    D3D11_CREATE_DEVICE_FLAG(D3D11_CREATE_DEVICE_BGRA_SUPPORT),
+                    Some(&[D3D_FEATURE_LEVEL_11_0]),
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    Some(&mut context),
+                )
+            }
+        };
+        result.map_err(|e| format!("D3D11CreateDevice: {e}"))?;
+        match (device, context) {
+            (Some(device), Some(context)) => Ok((device, context)),
+            _ => Err("D3D11CreateDevice succeeded but returned no device".to_string()),
+        }
+    }
+}
+
+/// What `D3d11Cx::create_device_tier` built, and which attempts it had to skip.
+struct DeviceTier {
+    factory: IDXGIFactory2,
+    device: ID3D11Device,
+    context: ID3D11DeviceContext,
+    query: ID3D11Query,
+    attempt: DeviceAttempt,
+    /// The attempts that failed before `attempt` worked, with their error.
+    failures: Vec<(DeviceAttempt, String)>,
+}
+
+impl DeviceTier {
+    /// Logs the fallback, if there was one. Silent on the normal path.
+    fn report_fallback(&self) {
+        if self.failures.is_empty() {
+            return;
+        }
+        for (failed, error) in &self.failures {
+            crate::warning!("D3D11 device '{}' failed: {}", failed.name(), error);
+        }
+        crate::warning!(
+            "D3D11 running on '{}'{}",
+            self.attempt.name(),
+            match self.attempt {
+                DeviceAttempt::Warp => " (software rendering: expect it to be slow)",
+                _ => " (no hardware video decode)",
+            }
+        );
+    }
+}
+
+/// Tells the user, in a window, why the app cannot start — and then exits.
+///
+/// A Windows GUI app has no console: before this, a machine without Direct3D
+/// 11 (a virtual machine, a remote desktop, an old GPU) saw the program close
+/// without a word, and the panic message went nowhere. The log line is for
+/// whoever does have a console; the dialog is for everybody else.
+fn fail_without_graphics(attempts: &[(DeviceAttempt, String)]) -> ! {
+    let mut detail = String::new();
+    for (attempt, error) in attempts {
+        detail.push_str(&format!("\n  {}: {}", attempt.name(), error));
+    }
+    crate::error!("Direct3D 11 is not available, cannot start.{}", detail);
+    let text = format!(
+        "This application needs Direct3D 11 to draw its window, and this computer \
+         could not provide it - not with the graphics card, and not with Windows' \
+         software renderer (WARP).\n\n\
+         This usually happens in a virtual machine, over some remote desktop \
+         connections, or with an outdated graphics driver. Updating the graphics \
+         driver is the first thing to try.\n\nDetails:{detail}"
+    );
+    let caption = "Cannot start: Direct3D 11 is not available";
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let (text, caption) = (wide(&text), wide(caption));
+    #[link(name = "user32")]
+    extern "system" {
+        fn MessageBoxW(
+            hwnd: *mut core::ffi::c_void,
+            text: *const u16,
+            caption: *const u16,
+            utype: u32,
+        ) -> i32;
+    }
+    const MB_OK_ICONERROR: u32 = 0x0000_0010;
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            caption.as_ptr(),
+            MB_OK_ICONERROR,
+        );
+    }
+    std::process::exit(1);
 }
 
 impl D3d11Cx {
-    /// Builds the device tier: factory, adapter, device, immediate context and event query.
+    /// Builds the device tier: factory, device, immediate context and event query, trying
+    /// `attempts` in order until one comes up.
     ///
     /// Fallible because recovery calls it while the display driver may still be restarting,
     /// when `EnumAdapters` and `D3D11CreateDevice` fail transiently for a few hundred
-    /// milliseconds. Every argument is a literal, so nothing here depends on retained state.
-    fn create_device_tier() -> windows_core::Result<(
-        IDXGIFactory2,
-        ID3D11Device,
-        ID3D11DeviceContext,
-        ID3D11Query,
-    )> {
+    /// milliseconds. On failure it returns every attempt's error, so startup can tell the
+    /// user what was tried.
+    fn create_device_tier(attempts: &[DeviceAttempt]) -> Result<DeviceTier, Vec<(DeviceAttempt, String)>> {
         unsafe {
             // A DXGI factory snapshots its adapter enumeration when it is created, so one made
             // before a hybrid-GPU transition or a driver reinstall keeps handing back the
             // adapter that went away. Recovery always starts from a fresh factory.
-            let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))?;
-            let adapter = factory.EnumAdapters(0)?;
-            if let Ok(desc) = adapter.GetDesc() {
-                let len = desc.Description.iter().position(|c| *c == 0).unwrap_or(desc.Description.len());
-                crate::system_info::note_gpu_adapter(&String::from_utf16_lossy(&desc.Description[..len]));
+            let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))
+                .map_err(|e| vec![(attempts[0], format!("CreateDXGIFactory2: {e}"))])?;
+            let mut failures: Vec<(DeviceAttempt, String)> = Vec::new();
+            for &attempt in attempts {
+                let (device, context) = match attempt.create(&factory) {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        failures.push((attempt, error));
+                        continue;
+                    }
+                };
+
+                // NOTE: DXGI frame latency is now controlled per-swap-chain via
+                // IDXGISwapChain2::SetMaximumFrameLatency(1) in D3d11Window::new,
+                // paired with the frame-latency waitable object used to pace the
+                // render loop. The old device-level IDXGIDevice1::SetMaximumFrameLatency
+                // call has been removed so the two mechanisms don't conflict.
+
+                let mut query: Option<ID3D11Query> = None;
+                let made = device.CreateQuery(
+                    &D3D11_QUERY_DESC {
+                        Query: D3D11_QUERY_EVENT,
+                        MiscFlags: 0,
+                    },
+                    Some(&mut query),
+                );
+                match (made, query) {
+                    (Ok(()), Some(query)) => {
+                        return Ok(DeviceTier { factory, device, context, query, attempt, failures });
+                    }
+                    (Err(e), _) => failures.push((attempt, format!("CreateQuery: {e}"))),
+                    (Ok(()), None) => failures.push((attempt, "CreateQuery returned no query".to_string())),
+                }
             }
-            let mut device: Option<ID3D11Device> = None;
-            let mut context: Option<ID3D11DeviceContext> = None;
-            let mut query: Option<ID3D11Query> = None;
-            D3D11CreateDevice(
-                &adapter,
-                D3D_DRIVER_TYPE_UNKNOWN,
-                HMODULE(std::ptr::null_mut()),
-                D3D11_CREATE_DEVICE_FLAG(0x800 | 0x20), // VIDEO_SUPPORT | BGRA_SUPPORT
-                Some(&[D3D_FEATURE_LEVEL_11_0]),
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )?;
-
-            let device = device.unwrap();
-            let context = context.unwrap();
-
-            // NOTE: DXGI frame latency is now controlled per-swap-chain via
-            // IDXGISwapChain2::SetMaximumFrameLatency(1) in D3d11Window::new,
-            // paired with the frame-latency waitable object used to pace the
-            // render loop. The old device-level IDXGIDevice1::SetMaximumFrameLatency
-            // call has been removed so the two mechanisms don't conflict.
-
-            device.CreateQuery(
-                &D3D11_QUERY_DESC {
-                    Query: D3D11_QUERY_EVENT,
-                    MiscFlags: 0,
-                },
-                Some(&mut query),
-            )?;
-
-            Ok((factory, device, context, query.unwrap()))
+            Err(failures)
         }
     }
 
     pub fn new() -> D3d11Cx {
-        let (factory, device, context, query) =
-            Self::create_device_tier().expect("D3D11: could not create the initial device");
+        let tier = match Self::create_device_tier(&DeviceAttempt::ALL) {
+            Ok(tier) => tier,
+            Err(failures) => fail_without_graphics(&failures),
+        };
+        tier.report_fallback();
         D3d11Cx {
-            device,
-            context,
-            factory,
-            query,
+            device: tier.device,
+            context: tier.context,
+            factory: tier.factory,
+            query: tier.query,
             device_lost: Cell::new(false),
             other_error_logged: Cell::new(false),
+            on_warp: tier.attempt == DeviceAttempt::Warp,
         }
     }
 
@@ -2644,17 +2840,27 @@ impl D3d11Cx {
     /// the struct alone. `false` means the driver is not ready yet and the caller should retry
     /// on a later tick.
     pub fn recreate_device(&mut self) -> bool {
-        match Self::create_device_tier() {
-            Ok((factory, device, context, query)) => {
-                self.factory = factory;
-                self.device = device;
-                self.context = context;
-                self.query = query;
+        // An app that started on WARP stays allowed to come back on WARP; one that had a
+        // GPU waits for it. See `DeviceAttempt::HARDWARE`.
+        let attempts: &[DeviceAttempt] =
+            if self.on_warp { &DeviceAttempt::ALL } else { &DeviceAttempt::HARDWARE };
+        match Self::create_device_tier(attempts) {
+            Ok(tier) => {
+                tier.report_fallback();
+                self.factory = tier.factory;
+                self.device = tier.device;
+                self.context = tier.context;
+                self.query = tier.query;
+                self.on_warp = tier.attempt == DeviceAttempt::Warp;
                 self.other_error_logged.set(false);
                 true
             }
-            Err(e) => {
-                crate::error!("D3D11 device recreation failed, will retry: {}", e);
+            Err(failures) => {
+                let mut detail = String::new();
+                for (attempt, error) in &failures {
+                    detail.push_str(&format!(" {}: {};", attempt.name(), error));
+                }
+                crate::error!("D3D11 device recreation failed, will retry:{}", detail);
                 false
             }
         }
