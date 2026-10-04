@@ -87,23 +87,7 @@ pub fn convert_medium_to_dragitem(medium: STGMEDIUM) -> Option<DragItem> {
     };
 
     // extract/decode filenames
-    let mut filenames = Vec::<String>::new();
-    let mut filename = String::new();
-    for w in u16_slice {
-        if *w != 0 {
-            let c = match char::from_u32(*w as u32) {
-                Some(c) => c,
-                None => char::REPLACEMENT_CHARACTER,
-            };
-            filename.push(c);
-        } else {
-            if (filename.len() == 0) && (filenames.len() > 0) {
-                break;
-            }
-            filenames.push(filename);
-            filename = String::new();
-        }
-    }
+    let filenames = decode_filename_list(u16_slice);
 
     /*
     for filename in filenames.iter() {
@@ -126,6 +110,84 @@ pub fn convert_medium_to_dragitem(medium: STGMEDIUM) -> Option<DragItem> {
         paths: filenames,
         internal_id,
     })
+}
+
+/// Decodes the double-null-terminated UTF-16 name list of a `CF_HDROP`
+/// (`"a\0b\0c\0\0"`) into one `String` per file.
+///
+/// Each name is decoded as UTF-16, not unit by unit. The previous loop turned
+/// every `u16` into a `char` on its own, so any character outside the Basic
+/// Multilingual Plane — an emoji, which Windows stores as a surrogate PAIR —
+/// became two U+FFFD and the app received a path that does not exist
+/// (`playa 🌊.png` arrived as `playa ��.png`; measured with a real OLE drop on
+/// 2026-10-04, C107 in Brasa). An unpaired surrogate is still replaced rather
+/// than dropped, so a broken name stays visibly broken instead of silently
+/// pointing at a different file.
+fn decode_filename_list(units: &[u16]) -> Vec<String> {
+    let mut filenames = Vec::new();
+    for name in units.split(|unit| *unit == 0) {
+        // The first empty name is the list terminator; past it there is only
+        // the zero padding of the HGLOBAL.
+        if name.is_empty() {
+            break;
+        }
+        filenames.push(String::from_utf16_lossy(name));
+    }
+    filenames
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_filename_list;
+
+    /// The list exactly as Explorer writes it: names, a 0 after each, and one
+    /// more 0 at the end — encoded by `std`, not by the code under test.
+    fn cf_hdrop(names: &[&str]) -> Vec<u16> {
+        let mut units = Vec::new();
+        for name in names {
+            units.extend(name.encode_utf16());
+            units.push(0);
+        }
+        units.push(0);
+        units
+    }
+
+    #[test]
+    fn several_names_arrive_whole() {
+        let names = ["C:\\fotos\\uno.png", "C:\\fotos\\dos.png", "C:\\fotos\\tres.png"];
+        assert_eq!(decode_filename_list(&cf_hdrop(&names)), names);
+    }
+
+    #[test]
+    fn a_name_outside_the_bmp_keeps_its_character() {
+        // MUTATION CHECKED (2026-10-04): decoding unit by unit with
+        // `char::from_u32`, as before, gives `playa \u{FFFD}\u{FFFD}.png` and
+        // turns this test and the next one red (2 of 5); the other three stay
+        // green, as they should.
+        let names = ["C:\\fotos\\playa 🌊.png", "C:\\fotos\\uno.png"];
+        assert_eq!(decode_filename_list(&cf_hdrop(&names)), names);
+    }
+
+    #[test]
+    fn the_surrogate_pair_written_by_hand_decodes_too() {
+        // 🌊 is U+1F30A = D83C DF0A. Written by hand so the expectation does
+        // not come from the same encoder that built the input.
+        let units = [b'a' as u16, 0xD83C, 0xDF0A, 0, 0];
+        assert_eq!(decode_filename_list(&units), ["a\u{1F30A}"]);
+    }
+
+    #[test]
+    fn padding_after_the_terminator_is_ignored() {
+        let mut units = cf_hdrop(&["x.png"]);
+        units.extend([0, 0, 0, b'z' as u16, 0]);
+        assert_eq!(decode_filename_list(&units), ["x.png"]);
+    }
+
+    #[test]
+    fn an_empty_list_gives_nothing() {
+        assert!(decode_filename_list(&[0, 0]).is_empty());
+        assert!(decode_filename_list(&[]).is_empty());
+    }
 }
 
 // create new internal DROPFILES structure from DragItem
