@@ -502,6 +502,7 @@ impl LayoutContext {
                 cluster: self.current_row_len() + glyph.cluster,
                 advance_in_ems: glyph.advance_in_ems,
                 offset_in_ems: glyph.offset_in_ems,
+                rtl: glyph.rtl,
             };
             glyph.origin_in_lpxs.x = self.current_point_in_lpxs.x;
             self.current_point_in_lpxs.x += glyph.advance_in_lpxs();
@@ -686,6 +687,7 @@ impl LayoutContext {
                 cluster: last_row.text.len(), // beyond the text range
                 advance_in_ems: glyph.advance_in_ems,
                 offset_in_ems: glyph.offset_in_ems,
+                rtl: false,
             };
             last_row.width_in_lpxs += ellipsis_glyph.advance_in_lpxs();
             last_row.glyphs.push(ellipsis_glyph);
@@ -1188,11 +1190,19 @@ impl LaidoutText {
         let mut selection_rects = Vec::new();
         if start_row_index == end_row_index {
             let row = &self.rows[start_row_index];
+            // In a right-to-left run the logical start of a selection sits to
+            // the RIGHT of its end, so order the two edges before building
+            // the rect instead of handing out a negative width.
+            let (left_x_in_lpxs, right_x_in_lpxs) = if start_x_in_lpxs <= end_x_in_lpxs {
+                (start_x_in_lpxs, end_x_in_lpxs)
+            } else {
+                (end_x_in_lpxs, start_x_in_lpxs)
+            };
             selection_rects.push(SelectionRect {
                 rect_in_lpxs: Rect::new(
-                    Point::new(start_x_in_lpxs, row.origin_in_lpxs.y - row.ascender_in_lpxs),
+                    Point::new(left_x_in_lpxs, row.origin_in_lpxs.y - row.ascender_in_lpxs),
                     Size::new(
-                        end_x_in_lpxs - start_x_in_lpxs,
+                        right_x_in_lpxs - left_x_in_lpxs,
                         row.ascender_in_lpxs - row.descender_in_lpxs,
                     ),
                 ),
@@ -1270,71 +1280,171 @@ impl LaidoutRow {
             * next_row.line_spacing_scale
     }
 
-    pub fn x_in_lpxs_to_index(&self, x_in_lpxs: f32) -> usize {
-        use {super::slice::SliceExt, unicode_segmentation::UnicodeSegmentation};
+    /// The glyphs of this row reduced to what caret math needs.
+    fn caret_groups(&self) -> Vec<CaretGroup> {
+        caret_groups(
+            self.text.len(),
+            self.width_in_lpxs,
+            self.glyphs
+                .iter()
+                .map(|glyph| (glyph.cluster, glyph.origin_in_lpxs.x, glyph.rtl)),
+        )
+    }
 
-        let mut glyph_groups = self
-            .glyphs
-            .group_by(|glyph_0, glyph_1| glyph_0.cluster == glyph_1.cluster)
-            .peekable();
-        while let Some(glyph_group) = glyph_groups.next() {
-            let start = glyph_group[0].cluster;
-            let start_x_in_lpxs = glyph_group[0].origin_in_lpxs.x;
-            let next_glyph_group = glyph_groups.peek();
-            let end = next_glyph_group.map_or(self.text.len(), |next_glyph_group| {
-                next_glyph_group[0].cluster
-            });
-            let end_x_in_lpxs = next_glyph_group.map_or(self.width_in_lpxs, |next_glyph_group| {
-                next_glyph_group[0].origin_in_lpxs.x
-            });
-            let width_in_lpxs = end_x_in_lpxs - start_x_in_lpxs;
-            let grapheme_count = self.text[start..end].graphemes(true).count();
-            let grapheme_width_in_lpxs = width_in_lpxs / grapheme_count as f32;
-            let mut current_x_in_lpxs = start_x_in_lpxs;
-            for (grapheme_start, _) in self.text[start..end].grapheme_indices(true) {
-                if x_in_lpxs < current_x_in_lpxs + 0.5 * grapheme_width_in_lpxs {
-                    return start + grapheme_start;
-                }
-                current_x_in_lpxs += grapheme_width_in_lpxs;
-            }
-        }
-        self.text.len()
+    pub fn x_in_lpxs_to_index(&self, x_in_lpxs: f32) -> usize {
+        caret_x_to_index(&self.text, &self.caret_groups(), x_in_lpxs)
     }
 
     pub fn index_to_x_in_lpxs(&self, index: usize) -> f32 {
-        use {super::slice::SliceExt, unicode_segmentation::UnicodeSegmentation};
+        caret_index_to_x(&self.text, &self.caret_groups(), self.width_in_lpxs, index)
+    }
+}
 
-        let mut glyph_groups = self
-            .glyphs
-            .group_by(|glyph_0, glyph_1| glyph_0.cluster == glyph_1.cluster)
-            .peekable();
-        while let Some(glyph_group) = glyph_groups.next() {
-            let start = glyph_group[0].cluster;
-            let start_x_in_lpxs = glyph_group[0].origin_in_lpxs.x;
-            let end = glyph_groups
-                .peek()
-                .map_or(self.text.len(), |next_glyph_group| {
-                    next_glyph_group[0].cluster
-                });
-            let end_x_in_lpxs = glyph_groups
-                .peek()
-                .map_or(self.width_in_lpxs, |next_glyph_group| {
-                    next_glyph_group[0].origin_in_lpxs.x
-                });
-            let width_in_lpxs = end_x_in_lpxs - start_x_in_lpxs;
-            let grapheme_count = self.text[start..end].graphemes(true).count();
-            let grapheme_width_in_lpxs = width_in_lpxs / grapheme_count as f32;
-            let mut current_x_in_lpxs = start_x_in_lpxs;
-            for (grapheme_start, _) in self.text[start..end].grapheme_indices(true) {
-                let grapheme_start = start + grapheme_start;
-                if index == grapheme_start {
-                    return current_x_in_lpxs;
-                }
-                current_x_in_lpxs += grapheme_width_in_lpxs;
+/// A run of consecutive glyphs that share a cluster, with the LOGICAL byte
+/// range of text it stands for and the VISUAL span it occupies.
+///
+/// Why this exists: glyphs are stored in visual order. In a left-to-right run
+/// that is also logical order, so the range of a group used to be taken as
+/// "my cluster up to the next group's cluster". In a right-to-left run the
+/// clusters DECREASE in visual order, that range came out inverted, and
+/// `text[start..end]` panicked ("byte range starts at 30 but ends at 28") the
+/// moment a caret was placed in Arabic or Hebrew text. The logical end of a
+/// group is instead the smallest cluster that is greater than its own, which
+/// does not depend on the order the glyphs happen to be stored in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CaretGroup {
+    start: usize,
+    end: usize,
+    left_x_in_lpxs: f32,
+    right_x_in_lpxs: f32,
+    rtl: bool,
+}
+
+/// Groups `(cluster, x, rtl)` glyphs, given in visual order, into
+/// [`CaretGroup`]s. Never produces an inverted range: `start <= end <= text_len`.
+fn caret_groups(
+    text_len: usize,
+    width_in_lpxs: f32,
+    glyphs: impl Iterator<Item = (usize, f32, bool)>,
+) -> Vec<CaretGroup> {
+    let mut groups: Vec<CaretGroup> = Vec::new();
+    for (cluster, x_in_lpxs, rtl) in glyphs {
+        let cluster = cluster.min(text_len);
+        if groups.last().map_or(true, |group| group.start != cluster) {
+            groups.push(CaretGroup {
+                start: cluster,
+                end: cluster,
+                left_x_in_lpxs: x_in_lpxs,
+                right_x_in_lpxs: x_in_lpxs,
+                rtl,
+            });
+        }
+    }
+    for index in 0..groups.len() {
+        groups[index].right_x_in_lpxs = groups
+            .get(index + 1)
+            .map_or(width_in_lpxs, |next| next.left_x_in_lpxs);
+    }
+    // Sorted, deduplicated starts: the logical end of a group is the first
+    // start after its own, found by binary search so a long single-row text
+    // input does not go quadratic on every caret move.
+    let mut starts: Vec<usize> = groups.iter().map(|group| group.start).collect();
+    starts.sort_unstable();
+    starts.dedup();
+    for group in &mut groups {
+        let next = starts.partition_point(|&start| start <= group.start);
+        group.end = starts.get(next).copied().unwrap_or(text_len);
+    }
+    groups
+}
+
+/// Caret stops of one group as `(x, index)`: one before each grapheme, in
+/// logical order, and then the one after the last grapheme (`group.end`).
+///
+/// In an RTL group the first grapheme sits at the RIGHT edge and the stops
+/// walk leftwards; the stop after the group is its left edge.
+fn caret_stops(text: &str, group: &CaretGroup) -> Vec<(f32, usize)> {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    // `get` and not indexing: a cluster that is not a char boundary must
+    // degrade to "no stops inside this group", never to a panic.
+    let graphemes: Vec<usize> = text
+        .get(group.start..group.end)
+        .map(|slice| slice.grapheme_indices(true).map(|(at, _)| at).collect())
+        .unwrap_or_default();
+    let mut stops = Vec::with_capacity(graphemes.len() + 1);
+    if !graphemes.is_empty() {
+        let width_in_lpxs = group.right_x_in_lpxs - group.left_x_in_lpxs;
+        let grapheme_width_in_lpxs = width_in_lpxs / graphemes.len() as f32;
+        for (k, at) in graphemes.iter().enumerate() {
+            let x_in_lpxs = if group.rtl {
+                group.right_x_in_lpxs - k as f32 * grapheme_width_in_lpxs
+            } else {
+                group.left_x_in_lpxs + k as f32 * grapheme_width_in_lpxs
+            };
+            stops.push((x_in_lpxs, group.start + at));
+        }
+    }
+    let after_x_in_lpxs = if group.rtl {
+        group.left_x_in_lpxs
+    } else {
+        group.right_x_in_lpxs
+    };
+    stops.push((after_x_in_lpxs, group.end));
+    stops
+}
+
+fn caret_index_to_x(text: &str, groups: &[CaretGroup], width_in_lpxs: f32, index: usize) -> f32 {
+    // A caret BEFORE a grapheme wins over a caret after the previous group:
+    // in "ab رم" index 3 is both the end of the space and the start of "ر",
+    // and the character the caret precedes is the one it belongs to.
+    for group in groups {
+        if group.start <= index && index < group.end {
+            if let Some(&(x_in_lpxs, _)) = caret_stops(text, group)
+                .iter()
+                .find(|&&(_, stop)| stop == index)
+            {
+                return x_in_lpxs;
             }
         }
-        self.width_in_lpxs
     }
+    for group in groups {
+        if group.start < group.end && group.end == index {
+            if let Some(&(x_in_lpxs, _)) = caret_stops(text, group).last() {
+                return x_in_lpxs;
+            }
+        }
+    }
+    width_in_lpxs
+}
+
+fn caret_x_to_index(text: &str, groups: &[CaretGroup], x_in_lpxs: f32) -> usize {
+    // Only the stops `caret_index_to_x` actually draws are candidates. At the
+    // seam between an LTR and an RTL run, the stop AFTER a group often shares
+    // its index with the stop BEFORE a grapheme somewhere else on the row;
+    // the caret is drawn at the latter, so a click resolving to the former
+    // would put the caret far from where the user clicked.
+    let mut nonempty_starts: Vec<usize> = groups
+        .iter()
+        .filter(|group| group.start < group.end)
+        .map(|group| group.start)
+        .collect();
+    nonempty_starts.sort_unstable();
+    let mut best: Option<(f32, usize)> = None;
+    for group in groups {
+        let stops = caret_stops(text, group);
+        let (after, before) = stops.split_last().unwrap();
+        let drawn_after = nonempty_starts.binary_search(&after.1).is_err();
+        for &(stop_x_in_lpxs, stop) in before.iter().chain(drawn_after.then_some(after)) {
+            let distance = (stop_x_in_lpxs - x_in_lpxs).abs();
+            // `<=`: on an exact tie the later stop wins, which is what the
+            // old left-to-right code did at a grapheme's midpoint.
+            if best.map_or(true, |(best_distance, _)| distance <= best_distance) {
+                best = Some((distance, stop));
+            }
+        }
+    }
+    best.map_or(text.len(), |(_, stop)| stop)
 }
 
 #[derive(Clone, Debug)]
@@ -1347,6 +1457,8 @@ pub struct LaidoutGlyph {
     pub cluster: usize,
     pub advance_in_ems: f32,
     pub offset_in_ems: f32,
+    /// Shaped in a right-to-left run (see `ShapedGlyph::rtl`).
+    pub rtl: bool,
 }
 
 impl LaidoutGlyph {
@@ -1642,5 +1754,217 @@ mod tests {
         // the excess without waiting for a new insert.
         layouter.advance_cache_generation();
         assert!(layouter.cache_bytes <= LAYOUT_CACHE_MAX_BYTES);
+    }
+}
+
+/// Caret placement in right-to-left text.
+///
+/// Regression: typing two Arabic letters into a `TextInput` closed the app
+/// ("byte range starts at 30 but ends at 28" in `index_to_x_in_lpxs`), because
+/// a glyph group's logical range was taken from the NEXT group in visual
+/// order, and in an RTL run that one has a smaller cluster.
+///
+/// MUTATION these tests were checked against: in `caret_groups`, take
+/// `group.end` from the next group in visual order (the old
+/// `end = next.cluster`) instead of the binary search over sorted starts.
+/// Measured 2026-10-04: `rtl_pure_places_the_caret_from_the_right`,
+/// `rtl_cluster_with_several_graphemes_walks_leftwards` and
+/// `every_char_boundary_round_trips_to_the_same_place` go red. The panic
+/// tests stay green under that mutation on purpose: `caret_stops` slices with
+/// `get`, so an inverted range degrades to a wrong caret instead of a crash —
+/// two independent guards. Removing BOTH (old `end` and plain indexing in
+/// `caret_stops`) brings back the original crash: five of the eight go red,
+/// three of them with "byte range ... ends at" panics.
+#[cfg(test)]
+mod caret_tests {
+    use super::{caret_groups, caret_index_to_x, caret_x_to_index, CaretGroup};
+
+    fn groups(text: &str, width: f32, glyphs: &[(usize, f32, bool)]) -> Vec<CaretGroup> {
+        caret_groups(text.len(), width, glyphs.iter().copied())
+    }
+
+    /// "مر" is م (bytes 0..2) then ر (2..4). Shaped RTL, the glyphs come out
+    /// in visual order: ر on the left with cluster 2, م on the right with
+    /// cluster 0 — the decreasing clusters that used to panic.
+    #[test]
+    fn rtl_pure_places_the_caret_from_the_right() {
+        let text = "مر";
+        let g = groups(text, 20.0, &[(2, 0.0, true), (0, 10.0, true)]);
+        assert_eq!(caret_index_to_x(text, &g, 20.0, 0), 20.0, "before م: right edge");
+        assert_eq!(caret_index_to_x(text, &g, 20.0, 2), 10.0, "between the two");
+        assert_eq!(caret_index_to_x(text, &g, 20.0, 4), 0.0, "after ر: left edge");
+        assert_eq!(caret_x_to_index(text, &g, 19.0), 0);
+        assert_eq!(caret_x_to_index(text, &g, 11.0), 2);
+        assert_eq!(caret_x_to_index(text, &g, 1.0), 4);
+        assert_eq!(caret_x_to_index(text, &g, 500.0), 0, "past the right edge");
+        assert_eq!(caret_x_to_index(text, &g, -50.0), 4, "past the left edge");
+    }
+
+    /// One glyph standing for two graphemes (a ligature): the graphemes inside
+    /// it must also run right to left.
+    #[test]
+    fn rtl_cluster_with_several_graphemes_walks_leftwards() {
+        let text = "مرح"; // م 0..2, ر 2..4, ح 4..6
+        // ح alone on the left (cluster 4), "مر" as one glyph on the right.
+        let g = groups(text, 30.0, &[(4, 0.0, true), (0, 10.0, true)]);
+        let xs: Vec<f32> = [0, 2, 4, 6]
+            .iter()
+            .map(|&i| caret_index_to_x(text, &g, 30.0, i))
+            .collect();
+        assert_eq!(xs, vec![30.0, 20.0, 10.0, 0.0]);
+        for (i, x) in [(0, 29.0), (2, 21.0), (4, 9.0), (6, 0.5)] {
+            assert_eq!(caret_x_to_index(text, &g, x), i, "x = {x}");
+        }
+    }
+
+    /// Left-to-right text keeps exactly the behaviour it had.
+    #[test]
+    fn ltr_is_unchanged() {
+        let text = "abc";
+        let g = groups(text, 30.0, &[(0, 0.0, false), (1, 10.0, false), (2, 20.0, false)]);
+        for i in 0..=3 {
+            assert_eq!(caret_index_to_x(text, &g, 30.0, i), 10.0 * i as f32);
+        }
+        assert_eq!(caret_x_to_index(text, &g, -5.0), 0);
+        assert_eq!(caret_x_to_index(text, &g, 14.0), 1);
+        assert_eq!(caret_x_to_index(text, &g, 16.0), 2);
+        assert_eq!(caret_x_to_index(text, &g, 100.0), 3);
+        // A ligature ("ffi" as one glyph) still splits evenly, left to right.
+        let text = "ffix";
+        let g = groups(text, 40.0, &[(0, 0.0, false), (3, 30.0, false)]);
+        assert_eq!(caret_index_to_x(text, &g, 40.0, 1), 10.0);
+        assert_eq!(caret_index_to_x(text, &g, 40.0, 2), 20.0);
+    }
+
+    /// An ellipsis glyph carries `cluster == text.len()`: it must not panic and
+    /// must not swallow the end of the text.
+    #[test]
+    fn ellipsis_group_is_harmless() {
+        let text = "ab";
+        let g = groups(text, 30.0, &[(0, 0.0, false), (1, 10.0, false), (2, 20.0, false)]);
+        assert_eq!(caret_index_to_x(text, &g, 30.0, 2), 20.0);
+        assert_eq!(caret_x_to_index(text, &g, 29.0), 2);
+    }
+
+    /// Shapes `text` the way the shaper does — bidi visual runs, each run in
+    /// its own direction — but with rustybuzz directly, so the glyph ORDER
+    /// and clusters come from HarfBuzz' rules and not from our own idea of
+    /// them. Returns `(cluster, x, rtl)` in visual order and the width.
+    fn shape(text: &str) -> (Vec<(usize, f32, bool)>, f32) {
+        let data: &[u8] = include_bytes!("../../../widgets/resources/NotoSans-Regular.ttf");
+        let face = rustybuzz::Face::from_slice(data, 0).unwrap();
+        let bidi = unicode_bidi::ParagraphBidiInfo::new(text, None);
+        let (levels, runs) = bidi.visual_runs(0..text.len());
+        let mut out = Vec::new();
+        let mut x = 0.0;
+        for run in &runs {
+            let rtl = levels[run.start].is_rtl();
+            let mut buffer = rustybuzz::UnicodeBuffer::new();
+            buffer.set_direction(if rtl {
+                rustybuzz::Direction::RightToLeft
+            } else {
+                rustybuzz::Direction::LeftToRight
+            });
+            use unicode_segmentation::UnicodeSegmentation;
+            for (at, grapheme) in text[run.clone()].grapheme_indices(true) {
+                for c in grapheme.chars() {
+                    buffer.add(c, (run.start + at) as u32);
+                }
+            }
+            let shaped = rustybuzz::shape(&face, &[], buffer);
+            for (info, pos) in shaped.glyph_infos().iter().zip(shaped.glyph_positions()) {
+                out.push((info.cluster as usize, x, rtl));
+                // Missing glyphs can advance 0 in some fonts; keep every
+                // glyph visible so the x stops stay distinct.
+                x += (pos.x_advance as f32).max(100.0);
+            }
+        }
+        (out, x)
+    }
+
+    const TEXTS: &[&str] = &[
+        "مر",
+        "مرحبا بالعالم",
+        "שלום עולם",
+        "ab مر cd",
+        "abc שלום 123 def",
+        "مرحبا (2026)!",
+        "\"مرحبا\" said the sign",
+        "e\u{301}مر",
+        "hello",
+    ];
+
+    /// The shaper really does hand out decreasing clusters in an RTL run —
+    /// the premise of the whole fix, checked against HarfBuzz' port.
+    #[test]
+    fn rustybuzz_emits_rtl_clusters_in_decreasing_order() {
+        let (glyphs, _) = shape("مرحبا");
+        let clusters: Vec<usize> = glyphs.iter().map(|g| g.0).collect();
+        assert!(glyphs.iter().all(|g| g.2));
+        assert!(
+            clusters.windows(2).all(|w| w[0] >= w[1]) && clusters.first() > clusters.last(),
+            "{clusters:?}"
+        );
+    }
+
+    /// No byte offset and no x position may panic, in any of the texts: not
+    /// the char boundaries, not the bytes in the middle of a letter, not the
+    /// ones past the end.
+    #[test]
+    fn no_index_and_no_x_panics() {
+        for text in TEXTS {
+            let (glyphs, width) = shape(text);
+            let g = groups(text, width, &glyphs);
+            for index in 0..=text.len() + 2 {
+                let x = caret_index_to_x(text, &g, width, index);
+                assert!(x.is_finite(), "{text:?} index {index} -> {x}");
+            }
+            let mut x = -100.0;
+            while x < width + 100.0 {
+                let index = caret_x_to_index(text, &g, x);
+                assert!(index <= text.len() && text.is_char_boundary(index));
+                x += 7.0;
+            }
+        }
+    }
+
+    /// index -> x -> index lands on a caret stop drawn at the same place.
+    ///
+    /// Not index -> x -> index == index: at the seam between an LTR and an RTL
+    /// run two logical positions share one x (that is bidi, not a bug — a
+    /// native caret resolves it with affinity), so what must hold is that the
+    /// round trip shows the caret where it was.
+    #[test]
+    fn every_char_boundary_round_trips_to_the_same_place() {
+        for text in TEXTS {
+            let (glyphs, width) = shape(text);
+            let g = groups(text, width, &glyphs);
+            for (index, _) in text.char_indices().chain([(text.len(), ' ')]) {
+                let x = caret_index_to_x(text, &g, width, index);
+                let back = caret_x_to_index(text, &g, x);
+                assert_eq!(
+                    caret_index_to_x(text, &g, width, back),
+                    x,
+                    "{text:?}: index {index} at x {x} came back as {back}"
+                );
+            }
+        }
+    }
+
+    /// In a pure RTL word every grapheme boundary is a different x, so there
+    /// the strict round trip holds, and the caret moves LEFT as the index grows.
+    #[test]
+    fn pure_rtl_round_trips_exactly_and_moves_left() {
+        for text in ["مرحبا", "שלום"] {
+            let (glyphs, width) = shape(text);
+            let g = groups(text, width, &glyphs);
+            let mut previous = f32::INFINITY;
+            for (index, _) in text.char_indices().chain([(text.len(), ' ')]) {
+                let x = caret_index_to_x(text, &g, width, index);
+                assert!(x < previous, "{text:?}: index {index} at {x}, previous {previous}");
+                previous = x;
+                assert_eq!(caret_x_to_index(text, &g, x), index, "{text:?} at {x}");
+            }
+        }
     }
 }

@@ -483,6 +483,7 @@ impl Shaper {
                     advance_in_ems: glyph_position.x_advance as f32 / units_per_em,
                     offset_in_ems: glyph_position.x_offset as f32 / units_per_em,
                     y_offset_in_ems: glyph_position.y_offset as f32 / units_per_em,
+                    rtl: direction == Direction::Rtl,
                 }),
         );
 
@@ -521,6 +522,14 @@ pub struct ShapedGlyph {
     pub advance_in_ems: f32,
     pub offset_in_ems: f32,
     pub y_offset_in_ems: f32,
+    /// Whether this glyph was shaped in a right-to-left run.
+    ///
+    /// The shaper emits glyphs in visual order, so inside an RTL run the
+    /// clusters DECREASE from one glyph to the next. Anything that maps a
+    /// glyph back to its logical byte range (caret placement, hit testing)
+    /// needs to know that, and by the time glyphs reach the layouter the run
+    /// they came from is gone — hence the flag travels with the glyph.
+    pub rtl: bool,
 }
 
 #[cfg(test)]
