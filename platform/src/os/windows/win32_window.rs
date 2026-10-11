@@ -891,12 +891,20 @@ impl Win32Window {
                 }));
             }
             WM_KEYUP | WM_SYSKEYUP => {
+                let key_code = Self::virtual_key_to_key_code(wparam);
                 window.do_callback(Win32Event::KeyUp(KeyEvent {
-                    key_code: Self::virtual_key_to_key_code(wparam),
+                    key_code,
                     is_repeat: false,
                     modifiers: Self::get_key_modifiers(),
                     time: window.time_now(),
                 }));
+                // The synthetic modifiers live for one key press: releasing the
+                // key they were pressed with ends them, so a pilot that dies
+                // before posting its `0` cannot leave Ctrl stuck.
+                synthetic_modifiers::key_released(matches!(
+                    key_code,
+                    KeyCode::Control | KeyCode::Shift | KeyCode::Alt | KeyCode::Logo
+                ));
             }
             WM_CHAR => {
                 if let Ok(utf8) = String::from_utf16(&[wparam.0 as u16]) {
