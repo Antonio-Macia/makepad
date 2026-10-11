@@ -8,6 +8,7 @@ pub mod droptarget;
 pub mod enumformatetc;
 pub mod media_foundation;
 pub mod wasapi;
+pub mod synthetic_modifiers;
 pub mod win32_event;
 pub mod win32_window;
 pub mod windows_media;

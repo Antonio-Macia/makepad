@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 use {
+    crate::os::windows::synthetic_modifiers,
     crate::{
         area::Area,
         cursor::MouseCursor,
@@ -682,6 +683,13 @@ impl Win32Window {
         };
 
         let window = &mut (*(user_data as *mut Win32Window));
+        // Test-only modifiers channel (see `synthetic_modifiers`). The id is 0
+        // when the channel is off, and no message has id 0.
+        let synthetic_id = synthetic_modifiers::message_id();
+        if synthetic_id != 0 && msg == synthetic_id {
+            synthetic_modifiers::set(wparam.0 as u8);
+            return LRESULT(0);
+        }
         match msg {
             WM_ACTIVATE => {
                 if wparam.0 & 0xffff == WA_ACTIVE as usize {
@@ -893,7 +901,12 @@ impl Win32Window {
             WM_CHAR => {
                 if let Ok(utf8) = String::from_utf16(&[wparam.0 as u16]) {
                     let char_code = utf8.chars().next().unwrap();
-                    if char_code >= ' ' {
+                    // A synthetic Ctrl/Alt/Win must swallow the char that
+                    // TranslateMessage built from the real (unmodified) key
+                    // state, as a real Ctrl would have made it 0x1A.
+                    if char_code >= ' '
+                        && !synthetic_modifiers::suppresses_char(synthetic_modifiers::active())
+                    {
                         window.do_callback(Win32Event::TextInput(TextInputEvent {
                             input: utf8,
                             was_paste: false,
@@ -1205,13 +1218,19 @@ impl Win32Window {
         }
     }
 
+    /// The modifiers held now: the real ones (`GetKeyState`) OR-ed with the
+    /// synthetic ones of the test channel, which is off (all false) unless the
+    /// process started with `MAKEPAD_SYNTHETIC_MODIFIERS=1`.
     pub fn get_key_modifiers() -> KeyModifiers {
+        let (s_control, s_shift, s_alt, s_logo) =
+            synthetic_modifiers::decode(synthetic_modifiers::active());
         unsafe {
             KeyModifiers {
-                control: GetKeyState(VK_CONTROL.0 as i32) & 0x80 > 0,
-                shift: GetKeyState(VK_SHIFT.0 as i32) & 0x80 > 0,
-                alt: GetKeyState(VK_MENU.0 as i32) & 0x80 > 0,
-                logo: GetKeyState(VK_LWIN.0 as i32) & 0x80 > 0
+                control: s_control || GetKeyState(VK_CONTROL.0 as i32) & 0x80 > 0,
+                shift: s_shift || GetKeyState(VK_SHIFT.0 as i32) & 0x80 > 0,
+                alt: s_alt || GetKeyState(VK_MENU.0 as i32) & 0x80 > 0,
+                logo: s_logo
+                    || GetKeyState(VK_LWIN.0 as i32) & 0x80 > 0
                     || GetKeyState(VK_RWIN.0 as i32) & 0x80 > 0,
             }
         }
