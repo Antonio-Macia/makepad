@@ -80,3 +80,8 @@ tesla_credentials.json
 /route.md
 /shiny.md
 /status.md
+
+# atlas-headless (16-10-2026): `**/target/` con barra solo casa DIRECTORIOS, y un
+# enlace simbolico `target` (el de WSL, -> /mnt/wsl/targets/...) se colo versionado
+# en 0158824. Sin barra casa tambien el enlace.
+/target
