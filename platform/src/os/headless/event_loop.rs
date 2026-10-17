@@ -890,6 +890,10 @@ impl Cx {
                 }
                 // Track selection is currently implemented on Linux GStreamer only.
                 CxOsOp::SelectVideoTrack(_, _) | CxOsOp::SelectAudioTrack(_, _) => {}
+                // Named before the catch-all on purpose: the `_` arm below used to swallow it
+                // and the screen reader stayed mute without a word (c2ef4d2 fixed the other
+                // eight backends; this one only exists on atlas-headless).
+                CxOsOp::AccessibilityUpdate(_) => crate::cx_api::warn_accessibility_unsupported("headless"),
                 _ => {}
             }
         }
