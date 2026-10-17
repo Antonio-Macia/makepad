@@ -775,7 +775,7 @@ impl WaylandCx {
                 CxOsOp::ShowSelectionHandles { .. } => {}
                 CxOsOp::UpdateSelectionHandles { .. } => {}
                 CxOsOp::HideSelectionHandles => {}
-                CxOsOp::AccessibilityUpdate(_) => {}
+                CxOsOp::AccessibilityUpdate(_) => crate::cx_api::warn_accessibility_unsupported("Wayland"),
                 CxOsOp::StartDragging(items) => {
                     state.start_internal_drag(items);
                 }

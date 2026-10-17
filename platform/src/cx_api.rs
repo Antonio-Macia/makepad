@@ -1072,8 +1072,14 @@ impl Cx {
 
     /// Forward an accessibility tree update to the platform adapter.
     ///
-    /// The `update` is a type-erased `accesskit::TreeUpdate`. Platform backends
-    /// downcast it when an accessibility adapter is active.
+    /// The `update` is meant to be a type-erased `accesskit::TreeUpdate`.
+    ///
+    /// **No backend implements this yet**: all of them drop the update, so a
+    /// screen reader hears nothing. Each one calls
+    /// [`warn_accessibility_unsupported`] instead, which logs a warning once
+    /// per process, so wiring a tree here can't look like it works when it
+    /// doesn't. A backend that gains a real adapter replaces that call, and
+    /// its warning goes away with it.
     pub fn update_accessibility_tree(&mut self, update: Box<dyn std::any::Any + Send>) {
         self.platform_ops
             .push_back(CxOsOp::AccessibilityUpdate(AccessibilityUpdatePayload(
@@ -1942,3 +1948,18 @@ mod tests {
     }
 }
 
+/// Logs, once per process, that this platform drops accessibility updates.
+///
+/// Called by every backend's `CxOsOp::AccessibilityUpdate` arm while it has no
+/// accessibility adapter. Silently dropping the update made
+/// [`Cx::update_accessibility_tree`] look like it worked: it compiles, the call
+/// happens, and the screen reader stays mute.
+pub fn warn_accessibility_unsupported(platform: &str) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        crate::warning!(
+            "accessibility updates are not implemented on {platform}: the tree is dropped and screen readers get nothing"
+        );
+    }
+}

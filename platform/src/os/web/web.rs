@@ -741,7 +741,7 @@ impl Cx {
                 CxOsOp::ShowSelectionHandles { .. } => {}
                 CxOsOp::UpdateSelectionHandles { .. } => {}
                 CxOsOp::HideSelectionHandles => {}
-                CxOsOp::AccessibilityUpdate(_) => {}
+                CxOsOp::AccessibilityUpdate(_) => crate::cx_api::warn_accessibility_unsupported("web"),
                 CxOsOp::SetCursor(cursor) => {
                     self.os.from_wasm(FromWasmSetMouseCursor::new(cursor));
                 }

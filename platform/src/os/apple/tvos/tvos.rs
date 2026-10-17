@@ -252,7 +252,7 @@ impl Cx {
                 CxOsOp::ShowSelectionHandles { .. } => {}
                 CxOsOp::UpdateSelectionHandles { .. } => {}
                 CxOsOp::HideSelectionHandles => {}
-                CxOsOp::AccessibilityUpdate(_) => {}
+                CxOsOp::AccessibilityUpdate(_) => crate::cx_api::warn_accessibility_unsupported("tvOS"),
                 // Track selection is currently implemented on Linux GStreamer only.
                 CxOsOp::SelectVideoTrack(_, _) | CxOsOp::SelectAudioTrack(_, _) => {}
                 e => {
