@@ -693,7 +693,7 @@ impl X11Cx {
                 CxOsOp::ShowSelectionHandles { .. } => {}
                 CxOsOp::UpdateSelectionHandles { .. } => {}
                 CxOsOp::HideSelectionHandles => {}
-                CxOsOp::AccessibilityUpdate(_) => {}
+                CxOsOp::AccessibilityUpdate(_) => crate::cx_api::warn_accessibility_unsupported("X11"),
                 CxOsOp::StartDragging(items) => {
                     self.internal_drag_items = Some(Arc::new(items));
                 }
