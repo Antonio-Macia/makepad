@@ -2170,6 +2170,23 @@ impl Slider {
         self.to_external()
     }
 
+    /// Lower end of the range, as declared in the DSL (`min:`).
+    /// Read-only: needed by callers that describe the slider (e.g. to an
+    /// accessibility tree) and must report the same range the user sees.
+    pub fn min(&self) -> f64 {
+        self.min
+    }
+
+    /// Upper end of the range, as declared in the DSL (`max:`).
+    pub fn max(&self) -> f64 {
+        self.max
+    }
+
+    /// The label drawn next to the track (`text:`).
+    pub fn label(&self) -> &str {
+        &self.text
+    }
+
     pub fn set_value(&mut self, cx: &mut Cx, v: f64) {
         // `set_internal` already answers the only question worth asking --
         // whether the TRAVEL moved. Comparing the requested value against
@@ -2488,6 +2505,21 @@ impl SliderRef {
         let mut inner = self.borrow_mut()?;
         inner.reset_to_default(cx);
         Some(inner.to_external())
+    }
+
+    /// See [`Slider::min`]. `None` if the reference is empty.
+    pub fn min(&self) -> Option<f64> {
+        self.borrow().map(|inner| inner.min())
+    }
+
+    /// See [`Slider::max`]. `None` if the reference is empty.
+    pub fn max(&self) -> Option<f64> {
+        self.borrow().map(|inner| inner.max())
+    }
+
+    /// See [`Slider::label`]. `None` if the reference is empty.
+    pub fn label(&self) -> Option<String> {
+        self.borrow().map(|inner| inner.label().to_string())
     }
 
     pub fn slided(&self, actions: &Actions) -> Option<f64> {
