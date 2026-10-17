@@ -269,7 +269,7 @@ impl Cx {
                 CxOsOp::ShowSelectionHandles { .. } => {}
                 CxOsOp::UpdateSelectionHandles { .. } => {}
                 CxOsOp::HideSelectionHandles => {}
-                CxOsOp::AccessibilityUpdate(_) => {}
+                CxOsOp::AccessibilityUpdate(_) => crate::cx_api::warn_accessibility_unsupported("tvOS"),
                 CxOsOp::StartExternalDragging { .. } => {
                     crate::error!("external file dragging is not implemented on tvOS");
                     self.call_event_handler(&Event::DragEnd);

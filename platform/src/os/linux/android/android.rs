@@ -2731,7 +2731,7 @@ impl Cx {
                 CxOsOp::HideSelectionHandles => unsafe {
                     android_jni::to_java_hide_selection_handles();
                 },
-                CxOsOp::AccessibilityUpdate(_) => {}
+                CxOsOp::AccessibilityUpdate(_) => crate::cx_api::warn_accessibility_unsupported("Android"),
                 CxOsOp::ShowClipboardActions {
                     has_selection,
                     rect,

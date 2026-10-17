@@ -1298,7 +1298,7 @@ impl Cx {
                 CxOsOp::HideSelectionHandles => {
                     IosApp::hide_selection_handles();
                 }
-                CxOsOp::AccessibilityUpdate(_) => {}
+                CxOsOp::AccessibilityUpdate(_) => crate::cx_api::warn_accessibility_unsupported("iOS"),
                 CxOsOp::FullscreenWindow(_window_id) => {
                     IosApp::set_fullscreen(true);
                 }

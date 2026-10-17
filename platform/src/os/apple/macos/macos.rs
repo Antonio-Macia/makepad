@@ -2077,7 +2077,7 @@ impl Cx {
                 CxOsOp::ShowSelectionHandles { .. } => {}
                 CxOsOp::UpdateSelectionHandles { .. } => {}
                 CxOsOp::HideSelectionHandles => {}
-                CxOsOp::AccessibilityUpdate(_) => {}
+                CxOsOp::AccessibilityUpdate(_) => crate::cx_api::warn_accessibility_unsupported("macOS"),
                 CxOsOp::AttachCameraNativePreview { video_id, area } => {
                     let Some(draw_list_id) = area.draw_list_id() else {
                         continue;

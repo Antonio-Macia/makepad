@@ -1159,7 +1159,7 @@ impl Cx {
                 CxOsOp::ShowSelectionHandles { .. } => {}
                 CxOsOp::UpdateSelectionHandles { .. } => {}
                 CxOsOp::HideSelectionHandles => {}
-                CxOsOp::AccessibilityUpdate(_) => {}
+                CxOsOp::AccessibilityUpdate(_) => crate::cx_api::warn_accessibility_unsupported("Windows"),
                 CxOsOp::SetCursor(cursor) => {
                     with_win32_app(|app| app.set_mouse_cursor(cursor));
                 }
