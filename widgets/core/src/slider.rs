@@ -2074,6 +2074,14 @@ pub struct Slider {
     #[live(true)]
     hover_actions_enabled: bool,
 
+    // Whether the numeric value is drawn (the editable `text_input`). Apps that
+    // print the value themselves, in their own format and language, turn it off:
+    // otherwise the user reads the same number twice ("0.52" next to "52 %").
+    // With it off the slider takes keyboard focus itself, joins the Tab chain and
+    // answers the arrow keys, because the hidden text input was its only way in.
+    #[live(true)]
+    show_value: bool,
+
     #[rust]
     pub relative_value: f64,
     #[rust]
@@ -2117,6 +2125,37 @@ impl Slider {
         old != self.relative_value
     }
 
+    // The value an arrow/page/home/end key leads to, already clamped to the range.
+    // One arrow press moves one `step` or, with a continuous slider, 1 % of the
+    // range; Page keys move ten of those. None for any other key.
+    fn value_after_key(&self, key: KeyCode) -> Option<f64> {
+        let unit = if self.step != 0.0 {
+            self.step
+        } else {
+            (self.max - self.min) / 100.0
+        };
+        let now = self.to_external();
+        let v = match key {
+            KeyCode::ArrowLeft | KeyCode::ArrowDown => now - unit,
+            KeyCode::ArrowRight | KeyCode::ArrowUp => now + unit,
+            KeyCode::PageDown => now - unit * 10.0,
+            KeyCode::PageUp => now + unit * 10.0,
+            KeyCode::Home => self.min,
+            KeyCode::End => self.max,
+            _ => return None,
+        };
+        let v = if self.step != 0.0 {
+            // Land a hair above the grid point: `to_external` floors, and 0.3/0.1
+            // is 2.999…, so an exact target would floor back and the arrow key
+            // would seem dead on some values.
+            let idx = ((v - self.min) / self.step).round();
+            self.min + (idx + 1e-6) * self.step
+        } else {
+            v
+        };
+        Some(v.max(self.min).min(self.max))
+    }
+
     pub fn update_text_input(&mut self, cx: &mut Cx) {
         let e = self.to_external() * self.display_scale;
         let text = format_readout(e, self.precision, &self.unit);
@@ -2143,6 +2182,14 @@ impl Slider {
                 as f32;
         self.draw_bg.arc_origin = if self.arc_from_origin { 1.0 } else { 0.0 };
         self.draw_bg.begin(cx, walk, self.layout);
+
+        if !self.show_value {
+            self.draw_text
+                .draw_walk(cx, self.label_walk, self.label_align, &self.text);
+            self.draw_bg.end(cx);
+            cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
+            return;
+        }
 
         if let Flow::Right { wrap: false, .. } = self.layout.flow {
             if let Some(mut dw) = cx.defer_walk_turtle(self.label_walk) {
@@ -2344,6 +2391,28 @@ impl Widget for Slider {
                     }
                 }
             }
+            // Only reachable with `show_value: false`: otherwise the focus goes to
+            // the text input and the track never holds it.
+            Hit::KeyFocus(_) => {
+                self.animator_play(cx, ids!(focus.on));
+            }
+            Hit::KeyFocusLost(_) => {
+                self.animator_play(cx, ids!(focus.off));
+            }
+            Hit::KeyDown(ke) => {
+                if self.animator_in_state(cx, ids!(disabled.on)) {
+                    return ();
+                }
+                if let Some(v) = self.value_after_key(ke.key_code) {
+                    if self.set_internal(v) {
+                        self.update_text_input(cx);
+                        self.draw_bg.redraw(cx);
+                        // TextSlide and not Slide: one key press is a finished
+                        // change, so both `slided` and `end_slide` see it.
+                        cx.widget_action(uid, SliderAction::TextSlide(self.to_external()));
+                    }
+                }
+            }
             Hit::FingerDown(FingerDownEvent {
                 // abs,
                 // rect,
@@ -2364,10 +2433,14 @@ impl Widget for Slider {
                 // self.relative_value = ((abs.x - rect.pos.x) / rect.size.x ).max(0.0).min(1.0);
                 self.update_text_input(cx);
 
-                self.text_input.set_is_read_only(cx, true);
-                self.text_input.set_key_focus(cx);
-                self.text_input.select_all(cx);
-                self.text_input.redraw(cx);
+                if self.show_value {
+                    self.text_input.set_is_read_only(cx, true);
+                    self.text_input.set_key_focus(cx);
+                    self.text_input.select_all(cx);
+                    self.text_input.redraw(cx);
+                } else {
+                    cx.set_key_focus(self.draw_bg.area());
+                }
 
                 self.animator_play(cx, ids!(drag.on));
                 self.dragging = Some(self.relative_value);
@@ -2380,7 +2453,9 @@ impl Widget for Slider {
                     return ();
                 }
 
-                self.text_input.set_is_read_only(cx, false);
+                if self.show_value {
+                    self.text_input.set_is_read_only(cx, false);
+                }
                 // if the finger hasn't moved further than X we jump to edit-all on the text thing
                 self.text_input.force_new_edit_group();
                 self.animator_play(cx, ids!(drag.off));
