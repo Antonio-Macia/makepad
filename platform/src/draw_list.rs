@@ -611,6 +611,16 @@ pub struct CxDrawList {
     /// these into `draw_item_reorder`.
     pub overlay_order: u64,
 
+    /// The window Overlay this list was last stored in as a sub-list (set by
+    /// `begin_overlay_*`). Lets the pointer test ask "is this overlay still
+    /// painted?" the same way `Overlay::end` decides to flush it.
+    pub overlay_parent: Option<DrawListId>,
+
+    /// Window-space rect inside which this overlay list hides what is painted
+    /// BELOW it from the pointer: hover, press, wheel and a new touch. Set with
+    /// `Cx::set_pointer_occluder`; read by `pointer_occluded` in `event/finger.rs`.
+    pub pointer_occluder: Option<Rect>,
+
     pub draw_list_uniforms: DrawListUniforms,
     pub draw_list_has_clip: bool,
 
