@@ -167,6 +167,9 @@ pub struct Cx {
     pub keyboard: CxKeyboard,
     pub(crate) cancel_scopes: CxCancelScopes,
     pub fingers: CxFingers,
+    /// Overlay lists that declared a pointer occluder (see
+    /// `Cx::set_pointer_occluder`). Usually empty, or one or two entries.
+    pub(crate) pointer_occluders: Vec<crate::draw_list::DrawListId>,
     pub(crate) ime_area: Area,
     pub keyboard_shift: f64,
     pub(crate) drag_drop: CxDragDrop,
@@ -1049,6 +1052,7 @@ impl Cx {
             keyboard: Default::default(),
             cancel_scopes: Default::default(),
             fingers: Default::default(),
+            pointer_occluders: Vec::new(),
             drag_drop: Default::default(),
             file_dialogs: Default::default(),
             ime_area: Default::default(),

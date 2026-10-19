@@ -333,6 +333,9 @@ impl DrawList2d {
         let codeflow_parent_id = cx.draw_list_stack.last().cloned().unwrap();
 
         let overlay_id = cx.overlay_id.unwrap();
+        // Remember which Overlay holds us: a pointer occluder (see
+        // `Cx::set_pointer_occluder`) only counts while we are still in it.
+        cx.draw_lists[self.draw_list.id()].overlay_parent = Some(overlay_id);
         if always_last {
             cx.draw_lists[overlay_id].store_sub_list_last(redraw_id, self.draw_list.id());
         } else {

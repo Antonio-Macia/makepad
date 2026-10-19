@@ -1650,6 +1650,39 @@ impl Cx {
         self.fingers.acquire_sweep_lock(value)
     }
 
+    /// Declares (or with `None` withdraws) the window-space `rect` inside which
+    /// the overlay list `draw_list_id` hides what is painted below it from the
+    /// pointer: hover, press, wheel and a new touch.
+    ///
+    /// Why it exists: hits are resolved in TREE order (a `View` hands events to
+    /// its children last-first), not in paint order. A popup drawn into the
+    /// window Overlay lives in the tree inside the widget that opened it, so
+    /// every widget that comes later in the tree saw the pointer before the
+    /// popup could mark it — and a list that opens downwards covers exactly
+    /// those. With an occluder, `hits` answers `Nothing` for any area painted
+    /// below the occluding overlay at that point, whatever the tree order.
+    ///
+    /// Unlike `sweep_lock` it cannot strand the window: an occluder only counts
+    /// while its list is still painted in the Overlay (the same test
+    /// `Overlay::end` uses to flush a list that stopped drawing), so a popup
+    /// that is dropped, hidden with its parent or simply not drawn any more
+    /// stops occluding by itself. Releases (`MouseUp`), captured drags and
+    /// keyboard events are never occluded.
+    pub fn set_pointer_occluder(
+        &mut self,
+        draw_list_id: crate::draw_list::DrawListId,
+        rect: Option<Rect>,
+    ) {
+        if self.draw_lists.is_id_freed(draw_list_id) {
+            return;
+        }
+        self.draw_lists[draw_list_id].pointer_occluder = rect;
+        self.pointer_occluders.retain(|id| *id != draw_list_id);
+        if rect.is_some() {
+            self.pointer_occluders.push(draw_list_id);
+        }
+    }
+
     /// Hand the finger currently captured by `from` over to `to` (with sweep area
     /// `to_sweep`), so a drag begun on one widget can continue on another — e.g. a
     /// long-pressed drawer app handing its touch to the home pager for placement.
