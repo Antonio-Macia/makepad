@@ -390,7 +390,7 @@ impl CxWindowPool {
     }
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
+// Not behind the wasm/test `cfg` of the block below: native backends need it.
 impl Cx {
     /// The OS handle of a created window: the `HWND` on Windows, `None` on the
     /// other backends for now, and `None` before the window is created or after
@@ -413,7 +413,10 @@ impl Cx {
         }
         Some(window.native_handle as *mut std::ffi::c_void)
     }
+}
 
+#[cfg(any(target_arch = "wasm32", test))]
+impl Cx {
     pub(crate) fn call_window_zero_focus_event(&mut self, focused: bool) {
         let window_id = self
             .windows
