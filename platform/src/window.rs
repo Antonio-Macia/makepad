@@ -589,7 +589,8 @@ pub struct ScriptWindowHandle {
     /// Ask for a back buffer with 10 bits per channel instead of 8, in the same
     /// sRGB (SDR) colour space: what is drawn looks the same, gradients lose
     /// their banding. Read only when the window is created. D3D11 only for now;
-    /// where it is refused the window stays at 8 bits and the log says so.
+    /// where it is refused, or the platform has no 10-bit chain yet, the window
+    /// stays at 8 bits and the log says so.
     #[live]
     pub deep_color: bool,
     #[live(WindowBackdrop::None)]
@@ -644,6 +645,14 @@ impl ScriptHook for ScriptWindowHandle {
         // A back-buffer format is chosen with the swap chain; after that it
         // would mean rebuilding it, so it is a creation-time option.
         if !cx.windows[window_id].is_created {
+            // Only D3D11 builds a 10-bit chain today; elsewhere the request
+            // would vanish without a word, so it is said once, when it is set.
+            #[cfg(not(target_os = "windows"))]
+            if self.deep_color && !cx.windows[window_id].create_deep_color {
+                crate::error!(
+                    "window.deep_color: not supported on this platform yet; this window stays at 8 bits"
+                );
+            }
             cx.windows[window_id].create_deep_color = self.deep_color;
         }
         if self.dpi_override.is_some() {
@@ -1529,6 +1538,7 @@ mod tests {
                 dpi_override: Some(2.0),
                 topmost: false,
                 transparent: true,
+                deep_color: false,
                 backdrop: WindowBackdrop::Blur,
                 backdrop_intensity: 0.5,
                 macos: MacosWindowConfig::floating_panel(),

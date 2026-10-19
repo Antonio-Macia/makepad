@@ -1719,7 +1719,8 @@ fn read_texture_rgba(src: &ID3D11Texture2D, d3d11_cx: &D3d11Cx) -> Option<(u32, 
         if width == 0 || height == 0 {
             return None;
         }
-        // Channel order of the copied bytes. Window chains are created BGRA8;
+        // Channel order of the copied bytes. Window chains are BGRA8, or
+        // R10G10B10A2 with `deep_color` (brought down to 8 bits below);
         // accept the RGBA8 variant too so an offscreen target reads back
         // correctly instead of with red and blue swapped.
         let ten_bit = src_desc.Format == DXGI_FORMAT(24); // R10G10B10A2_UNORM
@@ -2033,13 +2034,6 @@ impl D3d11Window {
         window
     }
 
-    /// This window's swap-chain description.
-    ///
-    /// `waitable_swap_chain` is what separates a main window (an extra buffer beyond the frame
-    /// latency, and the FRAME_LATENCY_WAITABLE_OBJECT flag that gives the paint loop its beat)
-    /// from a popup (two buffers, no flags). `ResizeBuffers` must later be handed the same
-    /// flags the chain was created with, which is why that lives on the window rather than
-    /// being passed in.
     /// The back-buffer format: B8G8R8A8, or R10G10B10A2 with `deep_color`.
     ///
     /// R10G10B10A2's default colour space in a flip-model chain is
@@ -2056,6 +2050,13 @@ impl D3d11Window {
         }
     }
 
+    /// This window's swap-chain description.
+    ///
+    /// `waitable_swap_chain` is what separates a main window (an extra buffer beyond the frame
+    /// latency, and the FRAME_LATENCY_WAITABLE_OBJECT flag that gives the paint loop its beat)
+    /// from a popup (two buffers, no flags). `ResizeBuffers` must later be handed the same
+    /// flags the chain was created with, which is why that lives on the window rather than
+    /// being passed in.
     fn swap_chain_desc(&self) -> DXGI_SWAP_CHAIN_DESC1 {
         let wg = &self.window_geom;
         DXGI_SWAP_CHAIN_DESC1 {

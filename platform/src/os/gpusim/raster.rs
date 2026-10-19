@@ -458,6 +458,26 @@ fn cached_conversion<T: Copy>(
     ])
 }
 
+/// IEEE 754 binary16 to f32: normals, subnormals, zeros, infinities and NaN.
+#[inline]
+fn half_to_f32(h: u16) -> f32 {
+    let sign = ((h as u32) & 0x8000) << 16;
+    let exp = ((h >> 10) & 0x1F) as u32;
+    let man = (h & 0x3FF) as u32;
+    let bits = match (exp, man) {
+        (0, 0) => sign,
+        (0, _) => {
+            // Subnormal: value is man * 2^-24, exact in f32.
+            let v = man as f32 * (1.0 / 16_777_216.0);
+            return if sign != 0 { -v } else { v };
+        }
+        (0x1F, 0) => sign | 0x7F80_0000,
+        (0x1F, _) => sign | 0x7FC0_0000 | (man << 13),
+        _ => sign | ((exp + 112) << 23) | (man << 13),
+    };
+    f32::from_bits(bits)
+}
+
 #[inline]
 fn bgra_u32_to_rgba(pixel: u32) -> [f32; 4] {
     const INV: f32 = 1.0 / 255.0;
@@ -589,6 +609,36 @@ fn gpusim_vec_texture_info(
             updated,
             |v: f32| [v, v, v, v],
         ),
+        TextureFormat::VecRGBAf16 {
+            width,
+            height,
+            data: Some(data),
+            updated,
+        } => {
+            // Four halves per texel: viewed as `[u16; 4]` so the mirror is
+            // patched texel by texel like the other formats. Same alignment
+            // as `u16`, and a trailing partial texel is simply not viewed.
+            let texels = unsafe {
+                std::slice::from_raw_parts(data.as_ptr() as *const [u16; 4], data.len() / 4)
+            };
+            cached_conversion(
+                cache,
+                texture_index,
+                TextureConversionSignature {
+                    kind: 5,
+                    width: *width,
+                    height: *height,
+                    data_ptr: data.as_ptr() as usize,
+                    data_len: data.len(),
+                },
+                *width,
+                *height,
+                width.saturating_mul(*height).min(texels.len()),
+                texels,
+                updated,
+                |t: [u16; 4]| [half_to_f32(t[0]), half_to_f32(t[1]), half_to_f32(t[2]), half_to_f32(t[3])],
+            )
+        }
         _ => None,
     }
 }
@@ -2082,5 +2132,29 @@ impl Cx {
                     .saturating_add(conversion.unwrap_or(0)),
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod half_tests {
+    use super::half_to_f32;
+
+    // The oracle is IEEE 754 binary16, not this function: each bit pattern is
+    // the published encoding of the value beside it. Mutation tried: reading
+    // the exponent as `(h >> 11)` turns every normal case red.
+    #[test]
+    fn half_to_f32_matches_the_binary16_encodings() {
+        assert_eq!(half_to_f32(0x0000), 0.0);
+        assert!(half_to_f32(0x8000).is_sign_negative());
+        assert_eq!(half_to_f32(0x3C00), 1.0);
+        assert_eq!(half_to_f32(0x3800), 0.5);
+        assert_eq!(half_to_f32(0xC000), -2.0);
+        assert_eq!(half_to_f32(0x7BFF), 65504.0);
+        assert_eq!(half_to_f32(0x0001), 5.960_464_477_539_063e-8);
+        assert_eq!(half_to_f32(0x03FF), 6.097_555_160_522_461e-5);
+        assert_eq!(half_to_f32(0x0400), 6.103_515_625e-5);
+        assert_eq!(half_to_f32(0x7C00), f32::INFINITY);
+        assert_eq!(half_to_f32(0xFC00), f32::NEG_INFINITY);
+        assert!(half_to_f32(0x7E00).is_nan());
     }
 }
