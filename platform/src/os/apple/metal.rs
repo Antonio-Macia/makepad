@@ -5677,6 +5677,7 @@ impl CxTexture {
             TextureFormat::VecMipRGBAf32 { data, .. }
             | TextureFormat::VecRGBAf32 { data, .. }
             | TextureFormat::VecRf32 { data, .. } => data.is_some(),
+            TextureFormat::VecRGBAf16 { data, .. } => data.is_some(),
             TextureFormat::VecRu8 { data, .. } | TextureFormat::VecRGu8 { data, .. } => {
                 data.is_some()
             }
@@ -5761,6 +5762,18 @@ impl CxTexture {
                     *width,
                     *height,
                     16,
+                    VecLayout::Plain,
+                    as_bytes(data.as_ref().unwrap()),
+                ),
+                TextureFormat::VecRGBAf16 {
+                    width,
+                    height,
+                    data,
+                    ..
+                } => (
+                    *width,
+                    *height,
+                    8,
                     VecLayout::Plain,
                     as_bytes(data.as_ref().unwrap()),
                 ),

@@ -104,6 +104,7 @@ pub const DEBUG_OUTPUT: GLenum = 0x92E0;
 
 pub const RGBA: GLenum = 0x1908;
 pub const RGBA32F: GLenum = 0x8814;
+pub const RGBA16F: GLenum = 0x881A;
 pub const BGRA: GLenum = 0x80E1;
 pub const RED: GLenum = 0x1903;
 pub const R32F: GLenum = 0x822E;

@@ -655,6 +655,20 @@ pub enum TextureFormat {
         data: Option<Vec<f32>>,
         updated: TextureUpdated,
     },
+    /// An IMAGE in half floats: four IEEE 754 binary16 values per pixel, R-G-B-A,
+    /// kept as their bit patterns in `u16`. For pixels with more than 8 bits per
+    /// channel (or above 1.0) uploaded from the CPU.
+    ///
+    /// Unlike `VecRGBAf32`, which the backends treat as the glyph atlas (extra
+    /// height headroom, append-only partial updates), this one is always
+    /// exact-sized and a dirty rect is updated in place: it is sampled by
+    /// normalized UV like any other image.
+    VecRGBAf16 {
+        width: usize,
+        height: usize,
+        data: Option<Vec<u16>>,
+        updated: TextureUpdated,
+    },
     VecRu8 {
         width: usize,
         height: usize,
@@ -756,6 +770,10 @@ impl std::fmt::Debug for TextureFormat {
             TextureFormat::VecRGBAf32 { width, height, .. } => write!(
                 f,
                 "TextureFormat::VecRGBAf32(width:{width},height:{height})"
+            ),
+            TextureFormat::VecRGBAf16 { width, height, .. } => write!(
+                f,
+                "TextureFormat::VecRGBAf16(width:{width},height:{height})"
             ),
             TextureFormat::VecRu8 { width, height, .. } => {
                 write!(f, "TextureFormat::VecRu8(width:{width},height:{height})")
@@ -991,6 +1009,7 @@ impl CxTexture {
             TextureFormat::VecMipBGRAu8_32 { updated, .. } => updated,
             TextureFormat::VecMipRGBAf32 { updated, .. } => updated,
             TextureFormat::VecRGBAf32 { updated, .. } => updated,
+            TextureFormat::VecRGBAf16 { updated, .. } => updated,
             TextureFormat::VecRu8 { updated, .. } => updated,
             TextureFormat::VecRGu8 { updated, .. } => updated,
             TextureFormat::VecRf32 { updated, .. } => updated,
@@ -1020,6 +1039,7 @@ impl CxTexture {
             TextureFormat::VecMipBGRAu8_32 { updated, .. } => updated,
             TextureFormat::VecMipRGBAf32 { updated, .. } => updated,
             TextureFormat::VecRGBAf32 { updated, .. } => updated,
+            TextureFormat::VecRGBAf16 { updated, .. } => updated,
             TextureFormat::VecRu8 { updated, .. } => updated,
             TextureFormat::VecRGu8 { updated, .. } => updated,
             TextureFormat::VecRf32 { updated, .. } => updated,
@@ -1142,6 +1162,9 @@ impl TextureFormat {
             | TextureFormat::VecRf32 { data, .. } => data
                 .as_ref()
                 .map_or(0, |data| data.capacity().saturating_mul(4)),
+            TextureFormat::VecRGBAf16 { data, .. } => data
+                .as_ref()
+                .map_or(0, |data| data.capacity().saturating_mul(2)),
             TextureFormat::VecRu8 { data, .. } | TextureFormat::VecRGu8 { data, .. } => {
                 data.as_ref().map_or(0, |data| data.capacity())
             }
@@ -1162,6 +1185,7 @@ impl TextureFormat {
             Self::VecMipBGRAu8_32 { .. } => true,
             Self::VecMipRGBAf32 { .. } => true,
             Self::VecRGBAf32 { .. } => true,
+            Self::VecRGBAf16 { .. } => true,
             Self::VecRu8 { .. } => true,
             Self::VecRGu8 { .. } => true,
             Self::VecRf32 { .. } => true,
@@ -1225,6 +1249,7 @@ impl TextureFormat {
             Self::VecMipBGRAu8_32 { width, height, .. } => Some((*width, *height)),
             Self::VecMipRGBAf32 { width, height, .. } => Some((*width, *height)),
             Self::VecRGBAf32 { width, height, .. } => Some((*width, *height)),
+            Self::VecRGBAf16 { width, height, .. } => Some((*width, *height)),
             Self::VecRu8 { width, height, .. } => Some((*width, *height)),
             Self::VecRGu8 { width, height, .. } => Some((*width, *height)),
             Self::VecRf32 { width, height, .. } => Some((*width, *height)),
@@ -1277,6 +1302,12 @@ impl TextureFormat {
                 width: *width,
                 height: *height,
                 pixel: TexturePixel::RGBAf32,
+                category: TextureCategory::Vec,
+            }),
+            Self::VecRGBAf16 { width, height, .. } => Some(TextureAlloc {
+                width: *width,
+                height: *height,
+                pixel: TexturePixel::RGBAf16,
                 category: TextureCategory::Vec,
             }),
             Self::VecRu8 { width, height, .. } => Some(TextureAlloc {
@@ -1595,6 +1626,30 @@ impl Texture {
             TextureFormat::VecMipRGBAf32 { data, updated, .. } => (data, updated),
             TextureFormat::VecRGBAf32 { data, updated, .. } => (data, updated),
             _ => panic!("incorrect texture format for f32 image data"),
+        };
+        assert!(data.is_none(), "image data not taken or already put back");
+        *data = Some(new_data);
+        *updated = updated.update(dirty_rect);
+    }
+
+    /// Takes the half-float pixels (binary16 bit patterns) out of a `VecRGBAf16`
+    /// texture, to change them and hand them back with [`Self::put_back_vec_u16`].
+    pub fn take_vec_u16(&self, cx: &mut Cx) -> Vec<u16> {
+        let cx_texture = &mut cx.textures[self.texture_id()];
+        let data = match &mut cx_texture.format {
+            TextureFormat::VecRGBAf16 { data, .. } => data,
+            _ => panic!("Not the correct texture desc for f16 image data"),
+        };
+        data.take().expect("image data already taken")
+    }
+
+    /// Hands back the half-float pixels; only `dirty_rect` goes up to the GPU
+    /// (`None` = the whole texture).
+    pub fn put_back_vec_u16(&self, cx: &mut Cx, new_data: Vec<u16>, dirty_rect: Option<RectUsize>) {
+        let cx_texture = &mut cx.textures[self.texture_id()];
+        let (data, updated) = match &mut cx_texture.format {
+            TextureFormat::VecRGBAf16 { data, updated, .. } => (data, updated),
+            _ => panic!("incorrect texture format for f16 image data"),
         };
         assert!(data.is_none(), "image data not taken or already put back");
         *data = Some(new_data);

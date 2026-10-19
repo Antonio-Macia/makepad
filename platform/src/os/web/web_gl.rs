@@ -454,6 +454,13 @@ impl Cx {
                                         }),
                                     });
                                 }
+                                TextureFormat::VecRGBAf16 { .. } => {
+                                    crate::error!(
+                                        "VecRGBAf16 textures are not supported on WebGL yet; texture {} is not uploaded",
+                                        texture_id.0
+                                    );
+                                    continue;
+                                }
                                 _ => continue,
                             }
                         }

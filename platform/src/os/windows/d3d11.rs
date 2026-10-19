@@ -3370,6 +3370,21 @@ impl CxTexture {
                     data.as_ref()
                         .map_or(std::ptr::null(), |d| d.as_ptr() as *const u8),
                 ),
+                // Half-float image: not the glyph atlas (that one is R32G32B32A32), so it
+                // is allocated exact-sized and a dirty rect is updated in place below.
+                TextureFormat::VecRGBAf16 {
+                    width,
+                    height,
+                    data,
+                    ..
+                } => (
+                    DXGI_FORMAT(10), // R16G16B16A16_FLOAT
+                    *width,
+                    *height,
+                    8,
+                    data.as_ref()
+                        .map_or(std::ptr::null(), |d| d.as_ptr() as *const u8),
+                ),
                 TextureFormat::VecRu8 {
                     width,
                     height,

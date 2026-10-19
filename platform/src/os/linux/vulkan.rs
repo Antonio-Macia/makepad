@@ -4586,6 +4586,13 @@ impl CxVulkan {
                 false,
                 vk::Format::R32G32B32A32_SFLOAT,
             )),
+            TextureFormat::VecRGBAf16 { width, height, .. } => Some((
+                *width as u32,
+                *height as u32,
+                1,
+                false,
+                vk::Format::R16G16B16A16_SFLOAT,
+            )),
             TextureFormat::VecRu8 { width, height, .. } => Some((
                 *width as u32,
                 *height as u32,
@@ -4734,6 +4741,30 @@ impl CxVulkan {
                     width: w as u32,
                     height: h as u32,
                     layers: 6,
+                })
+            }
+            TextureFormat::VecRGBAf16 {
+                width,
+                height,
+                data,
+                ..
+            } => {
+                let (x, y, w, h) = Self::texture_upload_rect(*width, *height, updated, force_full)?;
+                let out = if let Some(data) = data.as_ref() {
+                    let src = unsafe {
+                        std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 2)
+                    };
+                    Self::pack_texture_region_bytes(src, *width, 8, x, y, w, h)
+                } else {
+                    vec![0u8; w.saturating_mul(h).saturating_mul(8)]
+                };
+                Some(VulkanTextureUpload {
+                    data: out,
+                    offset_x: x as u32,
+                    offset_y: y as u32,
+                    width: w as u32,
+                    height: h as u32,
+                    layers: 1,
                 })
             }
             TextureFormat::VecRGBAf32 {

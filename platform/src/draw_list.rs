@@ -594,6 +594,20 @@ impl Cx {
                         .saturating_mul(16)
                 }
             }
+            TextureFormat::VecRGBAf16 {
+                width,
+                height,
+                updated,
+                ..
+            } => {
+                if let TextureUpdated::Empty = updated {
+                    0
+                } else {
+                    (*width as u64)
+                        .saturating_mul(*height as u64)
+                        .saturating_mul(8)
+                }
+            }
             TextureFormat::VecRu8 {
                 width,
                 height,

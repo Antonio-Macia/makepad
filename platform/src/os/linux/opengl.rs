@@ -3077,6 +3077,22 @@ impl CxTexture {
                     false,
                     true,
                 ),
+                TextureFormat::VecRGBAf16 {
+                    width,
+                    height,
+                    data,
+                    ..
+                } => (
+                    *width,
+                    *height,
+                    gl_sys::RGBA16F,
+                    gl_sys::RGBA,
+                    gl_sys::HALF_FLOAT,
+                    data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
+                    8,
+                    false,
+                    false,
+                ),
                 TextureFormat::VecRu8 {
                     width,
                     height,
