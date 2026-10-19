@@ -392,6 +392,28 @@ impl CxWindowPool {
 
 #[cfg(any(target_arch = "wasm32", test))]
 impl Cx {
+    /// The OS handle of a created window: the `HWND` on Windows, `None` on the
+    /// other backends for now, and `None` before the window is created or after
+    /// it is destroyed.
+    ///
+    /// It exists so a library can attach what makepad does not do itself to the
+    /// real window — an accessibility adapter that answers `WM_GETOBJECT` is the
+    /// case that asked for it — without makepad depending on that library. The
+    /// handle is only valid on the UI thread and while the window lives; makepad
+    /// keeps owning it.
+    pub fn native_window_handle(&self, window_id: WindowId) -> Option<*mut std::ffi::c_void> {
+        // A stale id (the slot was reused by another window) gets `None`, not the
+        // other window's handle and not the `error!` that indexing would log.
+        let window = self.windows.0.pool.get(window_id.0)?;
+        if window.generation != window_id.1 {
+            return None;
+        }
+        if !window.is_created || window.native_handle == 0 {
+            return None;
+        }
+        Some(window.native_handle as *mut std::ffi::c_void)
+    }
+
     pub(crate) fn call_window_zero_focus_event(&mut self, focused: bool) {
         let window_id = self
             .windows
@@ -874,6 +896,10 @@ pub struct CxWindow {
     /// Whether makepad draws this window's minimize/maximize/close buttons itself (Windows, Wayland CSD),
     /// so they keep their size in layout points, unlike the OS's own buttons.
     pub(crate) draws_chrome_buttons: bool,
+    /// The OS window handle while the window exists (an `HWND` on Windows), as an
+    /// address; 0 when it is not created, already destroyed, or the backend does
+    /// not hand one out. Read through [`Cx::native_window_handle`].
+    pub(crate) native_handle: usize,
 }
 
 impl Default for CxWindow {
@@ -904,6 +930,7 @@ impl Default for CxWindow {
             uses_client_side_decorations: false,
             wayland_is_fullscreen: false,
             draws_chrome_buttons: false,
+            native_handle: 0,
         }
     }
 }
@@ -1136,6 +1163,21 @@ mod tests {
             outer_size: dvec2(width, height),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn native_window_handle_is_only_given_while_the_window_exists() {
+        // Mutation: dropping the `is_created` check makes the last assert fail
+        // (a destroyed window would hand out a dangling handle).
+        let mut cx = test_cx();
+        let window_id = WindowHandle::new(&mut cx).window_id();
+        assert_eq!(cx.native_window_handle(window_id), None, "not created yet");
+        cx.windows[window_id].is_created = true;
+        assert_eq!(cx.native_window_handle(window_id), None, "a backend that gives no handle");
+        cx.windows[window_id].native_handle = 0x1234;
+        assert_eq!(cx.native_window_handle(window_id), Some(0x1234 as *mut std::ffi::c_void));
+        cx.windows[window_id].is_created = false;
+        assert_eq!(cx.native_window_handle(window_id), None, "destroyed");
     }
 
     #[test]

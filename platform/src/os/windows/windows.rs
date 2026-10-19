@@ -182,6 +182,7 @@ impl Cx {
                     if let Some(index) = d3d11_windows.iter().position(|w| w.window_id == popup_id)
                     {
                         self.windows[popup_id].is_created = false;
+                        self.windows[popup_id].native_handle = 0;
                         d3d11_windows[index].win32_window.close_window();
                         d3d11_windows.remove(index);
                     }
@@ -200,6 +201,7 @@ impl Cx {
                 self.call_event_handler(&Event::WindowClosed(wc));
                 // Remove the window; tolerate CxOsOp::CloseWindow having removed it already.
                 self.windows[window_id].is_created = false;
+                self.windows[window_id].native_handle = 0;
                 if user_closed {
                     crate::remote::note_user_closed_window(window_id.id(), &title);
                 }
@@ -1002,6 +1004,9 @@ impl Cx {
                     window.os_dpi_factor = Some(d3d11_window.window_geom.dpi_factor);
                     window.window_geom =
                         window.native_window_geom_to_layout(d3d11_window.window_geom.clone());
+                    // Handed out by `Cx::native_window_handle`; cleared wherever
+                    // `is_created` goes back to false.
+                    window.native_handle = d3d11_window.win32_window.hwnd.0 as usize;
                     d3d11_windows.push(d3d11_window);
                     window.is_created = true;
                     geom_changes.push(WindowGeomChangeEvent {
@@ -1062,6 +1067,7 @@ impl Cx {
                     if let Some(index) = d3d11_windows.iter().position(|w| w.window_id == window_id)
                     {
                         self.windows[window_id].is_created = false;
+                        self.windows[window_id].native_handle = 0;
                         d3d11_windows[index].win32_window.close_window();
                         d3d11_windows.remove(index);
                     }
