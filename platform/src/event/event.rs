@@ -403,7 +403,10 @@ impl Event {
             66 => "ScriptReapply",
             69 => "LocationUpdate",
             70 => "LocationError",
-            71 => "ActivityResult",
+            // 77, not 71: 71 is `VideoTracksChanged`. The two shared it from
+            // cf6b78996 on, so this arm was unreachable and a hang report said
+            // `VideoTracksChanged` for an activity result (`ui_hang.rs`).
+            77 => "ActivityResult",
             _ => panic!(),
         }
     }
@@ -498,7 +501,7 @@ impl Event {
             Self::XrLocal(_) => 57,
             Self::Custom(_) => 60,
             Self::ScriptReapply => 66,
-            Self::ActivityResult(_) => 71,
+            Self::ActivityResult(_) => 77,
         }
     }
 
