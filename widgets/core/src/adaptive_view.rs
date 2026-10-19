@@ -111,6 +111,22 @@ pub struct AdaptiveView {
     #[rust]
     has_custom_templates: bool,
 
+    /// Whether the selector in place is still the one `on_after_apply` installs,
+    /// which only ever answers `Desktop` or `Mobile`. Together with
+    /// `has_custom_templates` it means the view's own variants are unreachable.
+    #[rust]
+    default_selector_in_use: bool,
+
+    /// So the "nobody set a selector" warning is said once, not every resize.
+    #[rust]
+    warned_default_selector: bool,
+
+    /// Ids the selector answered without a template, so each is said once and
+    /// not on every redraw or resize that asks again (a selector alternating
+    /// two bad ids would otherwise log on every switch).
+    #[rust]
+    warned_missing_templates: Vec<LiveId>,
+
     /// The most recent size of the parent.
     #[rust]
     parent_size: Vec2d,
@@ -183,10 +199,12 @@ impl ScriptHook for AdaptiveView {
                                 if let Some(template_obj) = kv.value.as_object() {
                                     self.templates
                                         .insert(id, vm.bx.heap.new_object_ref(template_obj));
-                                }
-
-                                if id != id!(Desktop) && id != id!(Mobile) {
-                                    self.has_custom_templates = true;
+                                    // Only a key that holds a template is a variant:
+                                    // a plain id-keyed value must not make the view
+                                    // think it has variants of its own.
+                                    if id != id!(Desktop) && id != id!(Mobile) {
+                                        self.has_custom_templates = true;
+                                    }
                                 }
 
                                 if let Some(widget_variant) = self.active_widget.as_mut() {
@@ -272,6 +290,49 @@ impl AdaptiveView {
 
         let template_id = variant_selector(cx, &self.parent_size);
 
+        // A view with its own variants (`Compact`/`Wide`...) and the default
+        // selector draws `Desktop`/`Mobile`, which are the empty base variants
+        // unless overridden: a hole where the UI should be, with no error.
+        // Said here, at the first selection, and not in `on_after_apply`: the
+        // consumer sets its selector from Rust after the apply, so warning
+        // there would fire for every correct use.
+        if self.default_selector_in_use && self.has_custom_templates && !self.warned_default_selector {
+            self.warned_default_selector = true;
+            let mut custom: Vec<String> = self
+                .templates
+                .keys()
+                .filter(|id| **id != id!(Desktop) && **id != id!(Mobile))
+                .map(|id| id.to_string())
+                .collect();
+            custom.sort();
+            warning!(
+                concat!(
+                    "AdaptiveView declares its own variants ({}) but had no set_variant_selector by its first draw: ",
+                    "the default selector only picks Desktop or Mobile (now {}), so those variants never ",
+                    "show, and if Desktop/Mobile are not overridden nothing is drawn"
+                ),
+                custom.join(", "),
+                template_id
+            );
+        }
+
+        // A selector answering an id with no template used to hit an `unwrap`
+        // with no hint of which view or which id. Say both and keep what is shown.
+        if !self.templates.contains_key(&template_id) {
+            if self.warned_missing_templates.contains(&template_id) {
+                return;
+            }
+            self.warned_missing_templates.push(template_id);
+            let mut known: Vec<String> = self.templates.keys().map(|id| id.to_string()).collect();
+            known.sort();
+            error!(
+                "AdaptiveView: the variant selector returned {} but this view only has {}",
+                template_id,
+                known.join(", ")
+            );
+            return;
+        }
+
         // If the selector resulted in a widget that is already active, do nothing
         if let Some(active_widget) = self.active_widget.as_mut() {
             if active_widget.template_id == template_id {
@@ -298,7 +359,7 @@ impl AdaptiveView {
         // process this invalidation in the next event cycle.
         cx.widget_query_invalidation_event = Some(cx.event_id());
 
-        // Otherwise create a new widget from the template
+        // Otherwise create a new widget from the template (checked above).
         let template_ref = self.templates.get(&template_id).unwrap();
         let template_value: ScriptValue = template_ref.as_object().into();
         let widget_ref = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value));
@@ -329,6 +390,7 @@ impl AdaptiveView {
     ) {
         self.variant_selector = Some(Box::new(selector));
         self.should_reapply_selector = true;
+        self.default_selector_in_use = false;
     }
 
     /// The template id of the currently-active variant (e.g. `Desktop`/`Mobile`),
@@ -354,6 +416,7 @@ impl AdaptiveView {
                 live_id!(Mobile)
             }
         });
+        self.default_selector_in_use = true;
     }
 }
 
