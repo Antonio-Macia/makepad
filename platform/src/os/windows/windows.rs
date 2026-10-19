@@ -994,6 +994,7 @@ impl Cx {
                         create_position,
                         &window.create_title,
                         window.is_fullscreen,
+                        window.create_deep_color,
                     );
                     let visuals = window.window_visuals();
                     let mut d3d11_window = d3d11_window;

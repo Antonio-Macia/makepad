@@ -1722,9 +1722,10 @@ fn read_texture_rgba(src: &ID3D11Texture2D, d3d11_cx: &D3d11Cx) -> Option<(u32, 
         // Channel order of the copied bytes. Window chains are created BGRA8;
         // accept the RGBA8 variant too so an offscreen target reads back
         // correctly instead of with red and blue swapped.
+        let ten_bit = src_desc.Format == DXGI_FORMAT(24); // R10G10B10A2_UNORM
         let swap_rb = if src_desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM {
             true
-        } else if src_desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM {
+        } else if src_desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM || ten_bit {
             false
         } else {
             crate::error!(
@@ -1786,6 +1787,17 @@ fn read_texture_rgba(src: &ID3D11Texture2D, d3d11_cx: &D3d11Cx) -> Option<(u32, 
             );
         }
         d3d11_cx.context.Unmap(&staging_res, 0);
+        if ten_bit {
+            // Each pixel is one little-endian u32: R in bits 0-9, G 10-19,
+            // B 20-29, A 30-31. The capture is 8-bit RGBA, so keep the top 8.
+            for px in out.chunks_exact_mut(4) {
+                let v = u32::from_le_bytes([px[0], px[1], px[2], px[3]]);
+                px[0] = ((v >> 2) & 0xff) as u8;
+                px[1] = ((v >> 12) & 0xff) as u8;
+                px[2] = ((v >> 22) & 0xff) as u8;
+                px[3] = (((v >> 30) & 0x3) * 85) as u8;
+            }
+        }
         if swap_rb {
             for px in out.chunks_exact_mut(4) {
                 px.swap(0, 2);
@@ -1906,6 +1918,10 @@ pub struct D3d11Window {
     /// we track this at creation rather than inferring it from `frame_latency_waitable`
     /// (which can be null even on a waitable chain if the `IDXGISwapChain2` cast failed).
     pub waitable_swap_chain: bool,
+    /// The back buffer is R10G10B10A2 (10 bits per channel, SDR) instead of
+    /// B8G8R8A8: `window.deep_color`. Cleared if the device refuses the chain,
+    /// which then falls back to 8 bits. `ResizeBuffers` must keep the format.
+    pub deep_color: bool,
     /// Once-per-failure-episode log latch for `resize_buffers` errors, which are
     /// retried every paint and would otherwise log on each attempt.
     pub resize_error_logged: bool,
@@ -1942,6 +1958,7 @@ impl D3d11Window {
         position: Option<Vec2d>,
         title: &str,
         is_fullscreen: bool,
+        deep_color: bool,
     ) -> D3d11Window {
         // create window, and then initialize it; this is needed because
         // GWLP_USERDATA needs to reference a stable and existing window
@@ -1964,6 +1981,7 @@ impl D3d11Window {
             swap_chain: None,
             frame_latency_waitable: HANDLE(std::ptr::null_mut()),
             waitable_swap_chain: true,
+            deep_color,
             resize_error_logged: false,
             present_error_logged: false,
             refresh_period: DEFAULT_REFRESH_PERIOD,
@@ -2002,6 +2020,7 @@ impl D3d11Window {
             // render loop skips waiting on it.
             frame_latency_waitable: HANDLE(std::ptr::null_mut()),
             waitable_swap_chain: false,
+            deep_color: false,
             resize_error_logged: false,
             present_error_logged: false,
             refresh_period: DEFAULT_REFRESH_PERIOD,
@@ -2021,6 +2040,22 @@ impl D3d11Window {
     /// from a popup (two buffers, no flags). `ResizeBuffers` must later be handed the same
     /// flags the chain was created with, which is why that lives on the window rather than
     /// being passed in.
+    /// The back-buffer format: B8G8R8A8, or R10G10B10A2 with `deep_color`.
+    ///
+    /// R10G10B10A2's default colour space in a flip-model chain is
+    /// `RGB_FULL_G22_NONE_P709`, the same sRGB the 8-bit chain shows, so the
+    /// shaders write the same values and nothing changes on screen but the
+    /// precision. (HDR would be R16G16B16A16_FLOAT in scRGB, which is LINEAR:
+    /// every shader writes gamma-encoded values, so it needs an output pass and
+    /// is deliberately not this.)
+    fn back_buffer_format(&self) -> DXGI_FORMAT {
+        if self.deep_color {
+            DXGI_FORMAT(24) // R10G10B10A2_UNORM (constant stripped from the bindings)
+        } else {
+            DXGI_FORMAT_B8G8R8A8_UNORM
+        }
+    }
+
     fn swap_chain_desc(&self) -> DXGI_SWAP_CHAIN_DESC1 {
         let wg = &self.window_geom;
         DXGI_SWAP_CHAIN_DESC1 {
@@ -2032,7 +2067,7 @@ impl D3d11Window {
             },
             Width: (wg.inner_size.x * wg.dpi_factor).max(1.0) as u32,
             Height: (wg.inner_size.y * wg.dpi_factor).max(1.0) as u32,
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            Format: self.back_buffer_format(),
             Flags: if self.waitable_swap_chain {
                 DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32
             } else {
@@ -2067,6 +2102,16 @@ impl D3d11Window {
                 None,
             ) {
                 Ok(sc) => sc,
+                Err(e) if self.deep_color => {
+                    // Refused at 10 bits: say so and fall back to 8 rather than
+                    // leave the window without a chain.
+                    crate::error!(
+                        "window.deep_color: a 10-bit swap chain was refused ({}); this window stays at 8 bits",
+                        e
+                    );
+                    self.deep_color = false;
+                    return self.create_swap_chain(d3d11_cx);
+                }
                 Err(e) => {
                     d3d11_cx.note_error("IDXGIFactory2::CreateSwapChainForHwnd", &e);
                     return false;
@@ -2306,7 +2351,7 @@ impl D3d11Window {
                 0,
                 (wg.inner_size.x * wg.dpi_factor) as u32,
                 (wg.inner_size.y * wg.dpi_factor) as u32,
-                DXGI_FORMAT_B8G8R8A8_UNORM,
+                self.back_buffer_format(),
                 resize_flags,
             ) {
                 if !self.resize_error_logged {

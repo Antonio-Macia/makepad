@@ -586,6 +586,12 @@ pub struct ScriptWindowHandle {
     pub topmost: bool,
     #[live]
     pub transparent: bool,
+    /// Ask for a back buffer with 10 bits per channel instead of 8, in the same
+    /// sRGB (SDR) colour space: what is drawn looks the same, gradients lose
+    /// their banding. Read only when the window is created. D3D11 only for now;
+    /// where it is refused the window stays at 8 bits and the log says so.
+    #[live]
+    pub deep_color: bool,
     #[live(WindowBackdrop::None)]
     pub backdrop: WindowBackdrop,
     #[live(1.0)]
@@ -635,6 +641,11 @@ impl ScriptHook for ScriptWindowHandle {
             cx.windows[window_id].create_position = self.position;
         }
         cx.windows[window_id].kind_id = self.kind_id;
+        // A back-buffer format is chosen with the swap chain; after that it
+        // would mean rebuilding it, so it is a creation-time option.
+        if !cx.windows[window_id].is_created {
+            cx.windows[window_id].create_deep_color = self.deep_color;
+        }
         if self.dpi_override.is_some() {
             cx.windows[window_id].dpi_override = self.dpi_override;
         }
@@ -875,6 +886,8 @@ pub struct CxWindow {
     pub create_inner_size: Option<Vec2d>,
     pub create_icon: Option<WindowIcon>,
     pub create_app_id: String,
+    /// `window.deep_color` as it was when the window was created.
+    pub create_deep_color: bool,
     pub kind_id: usize,
     pub dpi_override: Option<f64>,
     pub os_dpi_factor: Option<f64>,
@@ -913,6 +926,7 @@ impl Default for CxWindow {
             create_inner_size: None,
             create_icon: None,
             create_app_id: String::default(),
+            create_deep_color: false,
             kind_id: 0,
             dpi_override: None,
             os_dpi_factor: None,
