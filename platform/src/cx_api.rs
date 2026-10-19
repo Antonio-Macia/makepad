@@ -1663,21 +1663,30 @@ impl Cx {
     /// below the occluding overlay at that point, whatever the tree order.
     ///
     /// Unlike `sweep_lock` it cannot strand the window: an occluder only counts
-    /// while its list is still painted in the Overlay (the same test
-    /// `Overlay::end` uses to flush a list that stopped drawing), so a popup
-    /// that is dropped, hidden with its parent or simply not drawn any more
-    /// stops occluding by itself. Releases (`MouseUp`), captured drags and
-    /// keyboard events are never occluded.
+    /// while its list is alive and its Overlay still holds it as a sub-list,
+    /// which is the RESULT of `Overlay::end`'s last flush (not its test: that
+    /// one compares redraw ids). So a popup that is dropped stops occluding at
+    /// once, and one that stops being drawn stops at the next draw of the list
+    /// that contains it, when `Overlay::end` takes it out. A popup whose
+    /// container is never redrawn (an invisible `View` with its own draw list)
+    /// stays painted, and occluding, until it is: makepad already left it on
+    /// screen. Releases (`MouseUp`), captured drags and keyboard events are
+    /// never occluded.
     pub fn set_pointer_occluder(
         &mut self,
         draw_list_id: crate::draw_list::DrawListId,
         rect: Option<Rect>,
     ) {
+        // Prune the entries of lists that were dropped while occluding (a popup
+        // dropped open never withdraws): they no longer count, but they would
+        // keep `pointer_occluded` off its empty fast path for good.
+        let lists = &self.draw_lists;
+        self.pointer_occluders
+            .retain(|id| *id != draw_list_id && !lists.is_id_freed(*id));
         if self.draw_lists.is_id_freed(draw_list_id) {
             return;
         }
         self.draw_lists[draw_list_id].pointer_occluder = rect;
-        self.pointer_occluders.retain(|id| *id != draw_list_id);
         if rect.is_some() {
             self.pointer_occluders.push(draw_list_id);
         }
