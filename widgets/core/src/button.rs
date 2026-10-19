@@ -1647,6 +1647,29 @@ impl Button {
         self.loading
     }
 
+    /// Presses the button the way its activation key does (`Hit::KeyUp`):
+    /// the same `Clicked` action with the same `action_data`, and the script
+    /// `on_click` (press and release at once, so it runs whatever
+    /// `trigger_on_press` says). Meant for assistive technology: a screen
+    /// reader's "Invoke" has no key and no pointer.
+    ///
+    /// Does nothing and returns `false` while disabled or loading, like the
+    /// key. Called outside of `handle_event`, the action carries no list
+    /// group, so `items_with_actions` of a list does not see it.
+    pub fn activate(&mut self, cx: &mut Cx) -> bool {
+        if !self.enabled || self.loading {
+            return false;
+        }
+        let uid = self.widget_uid();
+        cx.widget_action_with_data(
+            &self.action_data,
+            uid,
+            ButtonAction::Clicked(KeyModifiers::default()),
+        );
+        cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_click.clone(), &[]);
+        true
+    }
+
     /// Starts or ends the wait: the label fades under a turning arc and
     /// presses are ignored while it lasts.
     pub fn set_loading(&mut self, cx: &mut Cx, loading: bool) {
