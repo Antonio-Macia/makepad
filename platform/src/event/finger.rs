@@ -1036,6 +1036,9 @@ impl Event {
                 if cx.fingers.test_sweep_lock(options.sweep_area) {
                     return Hit::Nothing;
                 }
+                if pointer_occluded(cx, area, e.abs) {
+                    return Hit::Nothing;
+                }
                 if !cx.is_scrolling_allowed_within(&area) {
                     return Hit::Nothing;
                 }
@@ -1089,6 +1092,10 @@ impl Event {
                             }
 
                             if cx.fingers.find_area_capture(area).is_some() {
+                                continue;
+                            }
+
+                            if pointer_occluded(cx, area, t.abs) {
                                 continue;
                             }
 
@@ -1344,6 +1351,10 @@ impl Event {
                     };
 
                     let handled_area = e.handled.get();
+                    // Under an occluding overlay the area is not "over" at all,
+                    // so one that had the hover gets its HoverOut (a tooltip
+                    // that was showing goes away instead of sticking).
+                    let occluded = pointer_occluded(cx, area, e.abs);
 
                     let fhe = FingerHoverEvent {
                         window_id: e.window_id,
@@ -1357,6 +1368,7 @@ impl Event {
 
                     if hover_last == area {
                         if (handled_area.is_empty() || handled_area == area)
+                            && !occluded
                             && hit_test(e.abs, &rect, &options.margin)
                         {
                             e.handled.set(area);
@@ -1367,6 +1379,7 @@ impl Event {
                         }
                     } else {
                         if (handled_area.is_empty() || handled_area == area)
+                            && !occluded
                             && hit_test(e.abs, &rect, &options.margin)
                         {
                             //let any_captured = cx.fingers.get_digit_for_captured_area(area);
@@ -1413,6 +1426,10 @@ impl Event {
 
                 let rect = area.clipped_rect(&cx);
                 if !hit_test(e.abs, &rect, &options.margin) {
+                    return Hit::Nothing;
+                }
+
+                if pointer_occluded(cx, area, e.abs) {
                     return Hit::Nothing;
                 }
 
@@ -1529,5 +1546,232 @@ impl Event {
             _ => (),
         };
         Hit::Nothing
+    }
+}
+
+/// Is `abs` hidden from `area` by an overlay painted ABOVE it? The data side of
+/// `Cx::set_pointer_occluder`; the rule itself is [`occluded_by`].
+///
+/// "Painted" reads the RESULT of `Overlay::end`'s last flush: the list is alive
+/// and its Overlay still holds it as a sub-list. So an occluder whose popup was
+/// dropped stops counting at once, and one that is not drawn any more stops
+/// when `Overlay::end` takes it out — there is nothing to release, unlike a
+/// `sweep_lock`. See `Cx::set_pointer_occluder` for the one case that lags.
+fn pointer_occluded(cx: &Cx, area: Area, abs: Vec2d) -> bool {
+    use crate::draw_list::{CxDrawList, DrawListId};
+    let lists = &cx.draw_lists;
+    // Cheap reject first: this runs for every `hits` of every widget on every
+    // mouse move while a popup is open, and the chain walk below is not free.
+    // A rect that does not contain `abs` cannot occlude, alive or not.
+    let any_rect_here = cx.pointer_occluders.iter().any(|&id| {
+        lists
+            .checked_index(id)
+            .and_then(|l| l.pointer_occluder)
+            .map_or(false, |r| r.contains(abs))
+    });
+    if !any_rect_here {
+        return false;
+    }
+    let painted = |id: DrawListId| -> Option<&CxDrawList> {
+        if lists.is_id_freed(id) {
+            return None;
+        }
+        let list = lists.checked_index(id)?;
+        let parent_id = list.overlay_parent?;
+        if lists.is_id_freed(parent_id) {
+            return None;
+        }
+        let parent = lists.checked_index(parent_id)?;
+        let held = (0..parent.draw_items.len())
+            .any(|i| parent.draw_items[i].sub_list() == Some(id));
+        held.then_some(list)
+    };
+
+    // The overlay the area is painted in: the first painted overlay list up its
+    // codeflow chain (rows of a popup, or of a view nested inside it). None for
+    // the main content, which is below every overlay. The cap only guards
+    // against a malformed chain; real nesting is a handful of levels.
+    let Some(start) = area.draw_list_id() else {
+        return false;
+    };
+    let pass = lists.checked_index(start).and_then(|l| l.draw_pass_id);
+    let mut own = None;
+    let mut cur = Some(start);
+    for _ in 0..64 {
+        let Some(id) = cur else { break };
+        let Some(list) = lists.checked_index(id) else { break };
+        if painted(id).is_some() {
+            own = Some(list.overlay_order);
+            break;
+        }
+        cur = list.codeflow_parent_id;
+    }
+
+    // Only occluders of the same pass: `abs` is in that window's coordinates.
+    let occluders = cx.pointer_occluders.iter().filter_map(|&id| {
+        let list = painted(id)?;
+        if list.draw_pass_id != pass {
+            return None;
+        }
+        Some((list.overlay_order, list.pointer_occluder?))
+    });
+    occluded_by(own, occluders, abs)
+}
+
+/// The rule: `abs` is hidden from an area when it falls inside an occluder
+/// painted strictly ABOVE the overlay the area is painted in (`own`, with its
+/// paint order), or inside any occluder when the area is in no overlay at all.
+/// An area is never hidden by its own overlay — those are the popup's rows —
+/// because a list is not above itself: same order, and the test is strict.
+///
+/// Paint order and not tree order on purpose: what the user sees on top is
+/// what the pointer reaches. A modal drawn after a popup is above it and keeps
+/// the pointer over the popup's rect; a list opened from inside a popup is
+/// above its parent and hides the parent's rows beneath it.
+fn occluded_by(
+    own: Option<u64>,
+    occluders: impl Iterator<Item = (u64, Rect)>,
+    abs: Vec2d,
+) -> bool {
+    occluders.into_iter().any(|(order, rect)| {
+        rect.contains(abs) && own.map_or(true, |own_order| order > own_order)
+    })
+}
+
+/// The rule, without a `Cx`. That a hit really goes through it is checked on
+/// screen by the consumer that needed it (Brasa's `select_demo`, 19-10-2026).
+///
+/// MUTATIONS (19-10-2026, run): `order > own_order` → `>=` turns
+/// `own_overlay_never_hides_its_rows` RED; `map_or(true, …)` → `map_or(false, …)`
+/// turns `main_content_under_the_panel_is_hidden` RED.
+#[cfg(test)]
+mod occluder_tests {
+    use super::*;
+
+    fn r(x: f64, y: f64, w: f64, h: f64) -> Rect {
+        Rect {
+            pos: dvec2(x, y),
+            size: dvec2(w, h),
+        }
+    }
+
+    fn panel() -> (u64, Rect) {
+        (5, r(0.0, 0.0, 100.0, 100.0))
+    }
+
+    #[test]
+    fn main_content_under_the_panel_is_hidden() {
+        assert!(occluded_by(None, [panel()].into_iter(), dvec2(50.0, 50.0)));
+    }
+
+    #[test]
+    fn main_content_outside_the_panel_is_not() {
+        assert!(!occluded_by(None, [panel()].into_iter(), dvec2(150.0, 50.0)));
+    }
+
+    #[test]
+    fn own_overlay_never_hides_its_rows() {
+        assert!(!occluded_by(Some(5), [panel()].into_iter(), dvec2(50.0, 50.0)));
+    }
+
+    #[test]
+    fn an_overlay_painted_above_is_not_hidden() {
+        // A modal drawn after the popup.
+        assert!(!occluded_by(Some(8), [panel()].into_iter(), dvec2(50.0, 50.0)));
+    }
+
+    #[test]
+    fn an_overlay_painted_below_is_hidden() {
+        // The parent popup's rows under a list opened from inside it.
+        assert!(occluded_by(Some(2), [panel()].into_iter(), dvec2(50.0, 50.0)));
+    }
+
+    #[test]
+    fn the_highest_containing_occluder_decides() {
+        let sub = (6u64, r(100.0, 0.0, 100.0, 100.0));
+        // A row of the parent menu (order 5) next to its open submenu (6): reachable.
+        assert!(!occluded_by(Some(5), [panel(), sub].into_iter(), dvec2(50.0, 50.0)));
+        // A parent row under the submenu: hidden.
+        assert!(occluded_by(Some(5), [panel(), sub].into_iter(), dvec2(150.0, 50.0)));
+    }
+}
+
+/// The data side, with a real `Cx`: what makes an occluder count or stop
+/// counting. `occluder_tests` only sees occluders already filtered; this is the
+/// part that distinguishes it from a `sweep_lock` (nothing to release).
+///
+/// MUTATIONS (19-10-2026, run): `held.then_some(list)` → `Some(list)` turns
+/// `a_popup_flushed_from_its_overlay_stops_hiding` RED; dropping the
+/// `is_id_freed(id)` check in `painted` turns
+/// `a_dropped_popup_stops_hiding_and_is_pruned` RED; dropping the freed-id
+/// prune in `Cx::set_pointer_occluder` turns the same test RED.
+#[cfg(test)]
+mod occluder_liveness_tests {
+    use super::*;
+    use crate::area::InstanceArea;
+    use crate::draw_list::{DrawList, DrawListId};
+
+    fn area_in(list: DrawListId) -> Area {
+        Area::Instance(InstanceArea {
+            draw_list_id: list,
+            draw_item_id: 0,
+            instance_offset: 0,
+            instance_count: 1,
+            redraw_id: 1,
+        })
+    }
+
+    /// Main content, a window Overlay and a popup held by it, occluding
+    /// (0,0)-(100,100) — the shape `begin_overlay_*` leaves behind.
+    fn scene() -> (Cx, DrawList, DrawList, DrawList) {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let main = cx.draw_lists.alloc();
+        let overlay = cx.draw_lists.alloc();
+        let popup = cx.draw_lists.alloc();
+        cx.draw_lists[overlay.id()].append_sub_list(1, popup.id());
+        cx.draw_lists[popup.id()].overlay_parent = Some(overlay.id());
+        cx.draw_lists[popup.id()].overlay_order = 5;
+        cx.set_pointer_occluder(
+            popup.id(),
+            Some(Rect { pos: dvec2(0.0, 0.0), size: dvec2(100.0, 100.0) }),
+        );
+        (cx, main, overlay, popup)
+    }
+
+    #[test]
+    fn a_held_popup_hides_the_main_content_under_it_only() {
+        let (cx, main, _overlay, popup) = scene();
+        assert!(pointer_occluded(&cx, area_in(main.id()), dvec2(50.0, 50.0)));
+        assert!(!pointer_occluded(&cx, area_in(main.id()), dvec2(150.0, 50.0)));
+        // Its own rows are never hidden by it.
+        assert!(!pointer_occluded(&cx, area_in(popup.id()), dvec2(50.0, 50.0)));
+    }
+
+    #[test]
+    fn a_popup_flushed_from_its_overlay_stops_hiding() {
+        let (mut cx, main, overlay, _popup) = scene();
+        // What `Overlay::end` does to a list that was not drawn this time.
+        cx.draw_lists[overlay.id()].clear_draw_items(2);
+        assert!(!pointer_occluded(&cx, area_in(main.id()), dvec2(50.0, 50.0)));
+    }
+
+    #[test]
+    fn a_dropped_popup_stops_hiding_and_is_pruned() {
+        let (mut cx, main, _overlay, popup) = scene();
+        let other = cx.draw_lists.alloc();
+        // Dropped while open: nobody calls `set_pointer_occluder(.., None)`.
+        drop(popup);
+        assert!(!pointer_occluded(&cx, area_in(main.id()), dvec2(50.0, 50.0)));
+        // Any later declaration prunes the dead entry.
+        cx.set_pointer_occluder(other.id(), None);
+        assert!(cx.pointer_occluders.is_empty());
+    }
+
+    #[test]
+    fn withdrawing_stops_hiding() {
+        let (mut cx, main, _overlay, popup) = scene();
+        cx.set_pointer_occluder(popup.id(), None);
+        assert!(!pointer_occluded(&cx, area_in(main.id()), dvec2(50.0, 50.0)));
+        assert!(cx.pointer_occluders.is_empty());
     }
 }
