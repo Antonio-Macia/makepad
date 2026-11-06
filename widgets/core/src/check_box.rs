@@ -849,6 +849,40 @@ impl CheckBox {
         self.animator_in_state(cx, ids!(error.on))
     }
 
+    /// Flips the box as its Space/Return key does, from code that is not an
+    /// event of this widget (an assistive-technology request, a test): the
+    /// animation, `CheckBoxAction::Change(on)` carrying the `action_data`, and
+    /// the script's `on_click(on)`. A mixed box becomes On. Returns whether it
+    /// flipped; a disabled box does not, as `Button::activate` does not press a
+    /// disabled button (the key path itself never looked at `disabled`).
+    pub fn activate(&mut self, cx: &mut Cx) -> bool {
+        if self.disabled(cx) {
+            return false;
+        }
+        self.flip(cx);
+        true
+    }
+
+    /// The flip shared by the key and [`Self::activate`].
+    fn flip(&mut self, cx: &mut Cx) {
+        let uid = self.widget_uid();
+        if self.animator_in_state(cx, ids!(mixed.on)) {
+            self.animator_play(cx, ids!(mixed.off));
+        }
+        let on = !self.animator_in_state(cx, ids!(active.on));
+        self.animator_play(cx, if on { ids!(active.on) } else { ids!(active.off) });
+        self.state = if on { CheckState::On } else { CheckState::Off };
+        cx.widget_action_with_data(&self.action_data, uid, CheckBoxAction::Change(on));
+        cx.widget_to_script_call(
+            uid,
+            NIL,
+            self.source.clone(),
+            self.on_click.clone(),
+            &[ScriptValue::from_bool(on)],
+        );
+        self.draw_bg.redraw(cx);
+    }
+
     /// Turns the error intent on or off.
     pub fn set_error(&mut self, cx: &mut Cx, error: bool) {
         self.error = error;
@@ -967,21 +1001,7 @@ impl Widget for CheckBox {
             Hit::KeyDown(ke)
                 if !ke.is_repeat && matches!(ke.key_code, KeyCode::Space | KeyCode::ReturnKey | KeyCode::NumpadEnter) =>
             {
-                if self.animator_in_state(cx, ids!(mixed.on)) {
-                    self.animator_play(cx, ids!(mixed.off));
-                }
-                let on = !self.animator_in_state(cx, ids!(active.on));
-                self.animator_play(cx, if on { ids!(active.on) } else { ids!(active.off) });
-                self.state = if on { CheckState::On } else { CheckState::Off };
-                cx.widget_action_with_data(&self.action_data, uid, CheckBoxAction::Change(on));
-                cx.widget_to_script_call(
-                    uid,
-                    NIL,
-                    self.source.clone(),
-                    self.on_click.clone(),
-                    &[ScriptValue::from_bool(on)],
-                );
-                self.draw_bg.redraw(cx);
+                self.flip(cx);
             }
             Hit::FingerUp(fe) => {
                 self.animator_play(cx, ids!(press.off));
