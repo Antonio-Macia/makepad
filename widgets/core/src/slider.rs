@@ -2156,6 +2156,30 @@ impl Slider {
         Some(v.max(self.min).min(self.max))
     }
 
+    /// Moves the value as the given arrow/page/home/end key would, from code
+    /// that is not a key event of this widget (an assistive-technology
+    /// increment/decrement request, a test). Same step, same clamping, same
+    /// `SliderAction::TextSlide` as the key itself; a disabled slider does not
+    /// move. Returns whether the travel moved.
+    pub fn press_key(&mut self, cx: &mut Cx, key: KeyCode) -> bool {
+        if self.animator_in_state(cx, ids!(disabled.on)) {
+            return false;
+        }
+        let Some(v) = self.value_after_key(key) else {
+            return false;
+        };
+        if !self.set_internal(v) {
+            return false;
+        }
+        self.update_text_input(cx);
+        self.draw_bg.redraw(cx);
+        // TextSlide and not Slide: one key press is a finished change, so both
+        // `slided` and `end_slide` see it.
+        let uid = self.widget_uid();
+        cx.widget_action(uid, SliderAction::TextSlide(self.to_external()));
+        true
+    }
+
     pub fn update_text_input(&mut self, cx: &mut Cx) {
         let e = self.to_external() * self.display_scale;
         let text = format_readout(e, self.precision, &self.unit);
@@ -2403,15 +2427,7 @@ impl Widget for Slider {
                 if self.animator_in_state(cx, ids!(disabled.on)) {
                     return ();
                 }
-                if let Some(v) = self.value_after_key(ke.key_code) {
-                    if self.set_internal(v) {
-                        self.update_text_input(cx);
-                        self.draw_bg.redraw(cx);
-                        // TextSlide and not Slide: one key press is a finished
-                        // change, so both `slided` and `end_slide` see it.
-                        cx.widget_action(uid, SliderAction::TextSlide(self.to_external()));
-                    }
-                }
+                self.press_key(cx, ke.key_code);
             }
             Hit::FingerDown(FingerDownEvent {
                 // abs,
